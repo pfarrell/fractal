@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+    <head>
+
+    </head>
+    <body>
+        <canvas height="800" id="canvas" style="border: 1px grey solid" width="800">
+        </canvas>
+     </body>
+    <script>
+        var canvas = document.getElementById("canvas");
+        var canvas_context = canvas.getContext("2d");
+        var canvas_buffer = canvas_context.getImageData(0, 0, canvas.width, canvas.height);
+        var canvas_pitch = canvas_buffer.width * 4;
+        
+        var palette = [];
+        var GeneratePalette = function() {
+          var roffset = 24;
+          var goffset = 16;
+          var boffset = 0;
+          for (var i=0; i<256; i++) {
+              palette[i] = { r:roffset, g:goffset, b:boffset};
+   
+              if (i < 64) {
+                  roffset += 3;
+              } else if (i<128) {
+                  goffset += 3;
+              } else if (i<192) {
+                  boffset += 3;
+              }
+          }
+        }
+
+        var PutPixel = function(x, y, color) {
+            if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
+                return;
+            }
+
+            var offset = 4*Math.round(x) + canvas_pitch*Math.round(y);
+            canvas_buffer.data[offset++] = color[0];
+            canvas_buffer.data[offset++] = color[1];
+            canvas_buffer.data[offset++] = color[2];
+            canvas_buffer.data[offset] = 255; // Alpha = 255 (full opacity)
+        }
+
+        var UpdateCanvas = function() {
+            canvas_context.putImageData(canvas_buffer, 0, 0);
+        }
+
+        class MapRange {
+            constructor(xRange, yRange, minReal, maxReal, minImaginary, maxImaginary) {
+                this.xRange = xRange;
+                this.yRange = yRange;
+                this.minReal = minReal;
+                this.minImaginary = minImaginary;
+                this.maxReal = maxReal;
+                this.maxImaginary = maxImaginary;
+                this.realinc = Math.abs(this.maxReal - this.minReal) / this.xRange;
+                this.imaginc = Math.abs(this.maxImaginary - this.minImaginary) / this.yRange;    
+            }
+
+            pixelToComplex(x, y) {
+                return new ComplexNumber(this.minReal + x*this.realinc, this.maxImaginary - y*this.imaginc)
+            }
+
+            complexToPixel(cn) {
+                return [this.xRange * (cn.real - this.minReal) / (this.maxReal - this.minReal), this.yRange * (this.maxImaginary - cn.imaginary) / (this.maxImaginary - this.minImaginary)];
+            }
+
+        }
+
+        class ComplexNumber {
+            constructor(real, imaginary) {
+                this.real = real;
+                this.imaginary = imaginary;
+            }
+
+            add(cn) {
+                return new ComplexNumber(
+                    this.real + cn.real,
+                    this.imaginary + cn.imaginary
+                )
+            }
+
+            mult(cn) {
+                return new ComplexNumber(
+                    (this.real * cn.real) - (this.imaginary * cn.imaginary),
+                    (this.real * cn.imaginary) + (this.imaginary * cn.real)
+                )
+            }
+
+            square() {
+                return this.mult(this)
+            }
+
+            iterate(orig) {
+                return this.square().add(orig);
+            }
+
+            toString() {
+                return this.real + " + " + this.imaginary + "i";
+            }
+        }
+
+        GeneratePalette();
+        var mr = new MapRange(canvas.width, canvas.height, -2, 0.47, -1.2, 1.2);
+
+        // for(var i =0; i<.1; i+=.01) {
+        //     var cn = mr.pixelToComplex(300+i, 298);
+        //     var [x, y] = mr.complexToPixel(cn);
+        //     console.log(cn);
+        //     PutPixel(x, y, [0,0,0]);
+        // }
+        
+        var maxIterations = 250;
+        var iterScaler = 255 / maxIterations;
+        for(var x = 0; x<canvas.width; x++) {
+            for(var y=0; y<canvas.width; y++) {
+                var iter = mr.pixelToComplex(x, y);
+                var orig = iter;
+                var iteration = 0;
+                while(iteration < maxIterations && iter.real**2 + iter.imaginary**2 <= 4) {
+                    iteration+=1;
+                    iter = iter.iterate(orig);
+                }
+                var p = mr.complexToPixel(orig);
+                var scaledIteration = Math.floor(iteration * iterScaler);
+                var color = iteration == maxIterations ? {r: 0, g: 0, b: 0} : palette[scaledIteration];
+                PutPixel(p[0], p[1], [color.r, color.g, color.b]);
+            }
+        }
+        
+        UpdateCanvas();
+    </script>
+</html>
