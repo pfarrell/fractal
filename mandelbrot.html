@@ -4,7 +4,7 @@
 
     </head>
     <body>
-        <canvas height="800" id="canvas" style="border: 1px grey solid" width="800">
+        <canvas height="900" id="canvas" style="border: 1px grey solid" width="900">
         </canvas>
      </body>
     <script>
@@ -102,8 +102,9 @@
             }
         }
 
+        var mr = new MapRange(canvas.width, canvas.height, -2, .47, -1.2, 1.2);
+
         GeneratePalette();
-        var mr = new MapRange(canvas.width, canvas.height, -2, 0.47, -1.2, 1.2);
 
         // for(var i =0; i<.1; i+=.01) {
         //     var cn = mr.pixelToComplex(300+i, 298);
@@ -111,25 +112,70 @@
         //     console.log(cn);
         //     PutPixel(x, y, [0,0,0]);
         // }
-        
-        var maxIterations = 250;
+        var zoom = 1;
+        var maxIterations =  1000;
         var iterScaler = 255 / maxIterations;
-        for(var x = 0; x<canvas.width; x++) {
-            for(var y=0; y<canvas.width; y++) {
-                var iter = mr.pixelToComplex(x, y);
-                var orig = iter;
-                var iteration = 0;
-                while(iteration < maxIterations && iter.real**2 + iter.imaginary**2 <= 4) {
-                    iteration+=1;
-                    iter = iter.iterate(orig);
+    
+        var Render = function() {
+            for(var x = 0; x<canvas.width; x++) {
+                for(var y=0; y<canvas.width; y++) {
+                    var iter = mr.pixelToComplex(x, y);
+                    var orig = iter;
+                    var iteration = 0;
+                    while(iteration < maxIterations && iter.real**2 + iter.imaginary**2 <= 4) {
+                        iteration+=1;
+                        iter = iter.iterate(orig);
+                    }
+                    var p = mr.complexToPixel(orig);
+                    var scaledIteration = Math.floor(iteration * iterScaler);
+                    var color = iteration == maxIterations ? {r: 0, g: 0, b: 0} : palette[scaledIteration];
+                    PutPixel(p[0], p[1], [color.r, color.g, color.b]);
                 }
-                var p = mr.complexToPixel(orig);
-                var scaledIteration = Math.floor(iteration * iterScaler);
-                var color = iteration == maxIterations ? {r: 0, g: 0, b: 0} : palette[scaledIteration];
-                PutPixel(p[0], p[1], [color.r, color.g, color.b]);
             }
         }
-        
+    
+        function getMousePos(canvas, e) {
+            var rect = canvas.getBoundingClientRect();
+            return {
+                x: Math.round((e.clientX - rect.left)/(rect.right - rect.left)*canvas.width),
+                y: Math.round((e.clientY - rect.top)/(rect.bottom - rect.top)*canvas.height)
+            }
+        }
+
+        function zoomFractal(x, y, factor) {
+            var horizDelta = canvas.width / (2 * factor)
+            var vertDelta = canvas.height / (2 * factor)
+            var newLeftUp = mr.pixelToComplex(x - horizDelta, y - vertDelta);
+            var newRightBottom = mr.pixelToComplex(x + horizDelta, y + vertDelta);
+            mr = new MapRange(canvas.width, canvas.height, newLeftUp.real, newRightBottom.real, newRightBottom.imaginary, newLeftUp.imaginary);
+        }
+
+        var onMouseMove = function(e) {
+            var pos = getMousePos(canvas, e);
+            //console.log(mr.pixelToComplex(pos.x, pos.y));
+        }
+
+        var onMouseDown = function(e) {
+            var pos = getMousePos(canvas, e);
+            var zoomFactor = 2;
+            if(e.ctrlKey) {
+                zoomFactor = 0.5;
+            }
+            if(e.shiftKey) {
+                zoomFactor = 1;
+            }
+            zoomFractal(pos.x, pos.y, zoomFactor);
+            Render();
+            UpdateCanvas();
+        }
+
+        var Init = function() {
+            canvas.addEventListener("mousemove", onMouseMove);
+            canvas.addEventListener("mousedown", onMouseDown);
+        }
+
+        Init();
+        Render();
         UpdateCanvas();
     </script>
 </html>
