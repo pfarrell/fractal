@@ -22,11 +22,11 @@
               palette[i] = { r:roffset, g:goffset, b:boffset};
    
               if (i < 64) {
-                  roffset += 3;
-              } else if (i<128) {
-                  goffset += 3;
-              } else if (i<192) {
                   boffset += 3;
+              } else if (i<128) {
+                  roffset += 3;
+              } else if (i<192) {
+                  goffset += 3;
               }
           }
         }
@@ -113,10 +113,10 @@
         //     PutPixel(x, y, [0,0,0]);
         // }
         var zoom = 1;
-        var maxIterations =  1000;
-        var iterScaler = 255 / maxIterations;
+        var maxIterations =  100;
     
         var Render = function() {
+            var iterScaler = maxIterations >= 255 ? 255/maxIterations : 1;
             for(var x = 0; x<canvas.width; x++) {
                 for(var y=0; y<canvas.width; y++) {
                     var iter = mr.pixelToComplex(x, y);
@@ -128,7 +128,7 @@
                     }
                     var p = mr.complexToPixel(orig);
                     var scaledIteration = Math.floor(iteration * iterScaler);
-                    var color = iteration == maxIterations ? {r: 0, g: 0, b: 0} : palette[scaledIteration];
+                    var color = iteration == maxIterations ? {r: 255, g: 255, b: 255} : palette[scaledIteration];
                     PutPixel(p[0], p[1], [color.r, color.g, color.b]);
                 }
             }
@@ -160,10 +160,17 @@
             var zoomFactor = 2;
             if(e.ctrlKey) {
                 zoomFactor = 0.5;
-            }
-            if(e.shiftKey) {
+                maxIterations /= 0.5;
+                if(maxIterations < 100) { maxIterations = 100;}
+            } else if(e.shiftKey) {
                 zoomFactor = 1;
+            } else {
+                maxIterations *= 2;
+                if(maxIterations > 2000) {
+                    maxIterations = 2000;
+                }
             }
+            console.log(maxIterations);
             zoomFractal(pos.x, pos.y, zoomFactor);
             Render();
             UpdateCanvas();
