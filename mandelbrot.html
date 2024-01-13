@@ -1,12 +1,32 @@
 <!DOCTYPE html>
 <html>
     <head>
-
+        <style>
+            .lcolumn { 
+                float: left;
+                width: 1205px;
+            }
+            .rcolumn {
+                float: left;
+            }
+            .row:after {
+                content: "";
+                display: table;
+                clear: both;
+            }
+        </style>
     </head>
     <body>
-        <canvas height="900" id="canvas" style="border: 1px grey solid" width="900">
-        </canvas>
+        <div class="row">
+            <div class="lcolumn">
+                <canvas height="800" id="canvas" style="border: 1px grey solid" width="800"></canvas>
+            </div>
+            <div class="rcolumn">
+                hello
+            </div>
+        </div>
      </body>
+    <script src="./models.mj"></script>
     <script>
         var canvas = document.getElementById("canvas");
         var canvas_context = canvas.getContext("2d");
@@ -22,11 +42,11 @@
               palette[i] = { r:roffset, g:goffset, b:boffset};
    
               if (i < 64) {
-                  boffset += 3;
-              } else if (i<128) {
                   roffset += 3;
-              } else if (i<192) {
+              } else if (i<128) {
                   goffset += 3;
+              } else if (i<192) {
+                  boffset += 3;
               }
           }
         }
@@ -47,59 +67,11 @@
             canvas_context.putImageData(canvas_buffer, 0, 0);
         }
 
-        class MapRange {
-            constructor(xRange, yRange, minReal, maxReal, minImaginary, maxImaginary) {
-                this.xRange = xRange;
-                this.yRange = yRange;
-                this.minReal = minReal;
-                this.minImaginary = minImaginary;
-                this.maxReal = maxReal;
-                this.maxImaginary = maxImaginary;
-                this.realinc = Math.abs(this.maxReal - this.minReal) / this.xRange;
-                this.imaginc = Math.abs(this.maxImaginary - this.minImaginary) / this.yRange;    
-            }
-
-            pixelToComplex(x, y) {
-                return new ComplexNumber(this.minReal + x*this.realinc, this.maxImaginary - y*this.imaginc)
-            }
-
-            complexToPixel(cn) {
-                return [this.xRange * (cn.real - this.minReal) / (this.maxReal - this.minReal), this.yRange * (this.maxImaginary - cn.imaginary) / (this.maxImaginary - this.minImaginary)];
-            }
-
+        MapRange.prototype.pixelToComplex = function(x, y) {
+            return new ComplexNumber(this.minReal + x*this.realinc, this.maxImaginary - y*this.imaginc);
         }
-
-        class ComplexNumber {
-            constructor(real, imaginary) {
-                this.real = real;
-                this.imaginary = imaginary;
-            }
-
-            add(cn) {
-                return new ComplexNumber(
-                    this.real + cn.real,
-                    this.imaginary + cn.imaginary
-                )
-            }
-
-            mult(cn) {
-                return new ComplexNumber(
-                    (this.real * cn.real) - (this.imaginary * cn.imaginary),
-                    (this.real * cn.imaginary) + (this.imaginary * cn.real)
-                )
-            }
-
-            square() {
-                return this.mult(this)
-            }
-
-            iterate(orig) {
-                return this.square().add(orig);
-            }
-
-            toString() {
-                return this.real + " + " + this.imaginary + "i";
-            }
+        MapRange.prototype.complexToPixel = function(cn) {
+                return [this.xRange * (cn.real - this.minReal) / (this.maxReal - this.minReal), this.yRange * (this.maxImaginary - cn.imaginary) / (this.maxImaginary - this.minImaginary)];
         }
 
         var mr = new MapRange(canvas.width, canvas.height, -2, .47, -1.2, 1.2);
@@ -113,12 +85,14 @@
         //     PutPixel(x, y, [0,0,0]);
         // }
         var zoom = 1;
-        var maxIterations =  100;
+        var maxIterations =  500
+
     
         var Render = function() {
-            var iterScaler = maxIterations >= 255 ? 255/maxIterations : 1;
+            var iterScaler = 255/maxIterations;
+            var totalIter = 0;
             for(var x = 0; x<canvas.width; x++) {
-                for(var y=0; y<canvas.width; y++) {
+                for(var y=0; y<canvas.height; y++) {
                     var iter = mr.pixelToComplex(x, y);
                     var orig = iter;
                     var iteration = 0;
@@ -126,12 +100,13 @@
                         iteration+=1;
                         iter = iter.iterate(orig);
                     }
-                    var p = mr.complexToPixel(orig);
+                    totalIter += iteration;
                     var scaledIteration = Math.floor(iteration * iterScaler);
                     var color = iteration == maxIterations ? {r: 255, g: 255, b: 255} : palette[scaledIteration];
-                    PutPixel(p[0], p[1], [color.r, color.g, color.b]);
+                    PutPixel(x, y, [color.r, color.g, color.b]);
                 }
             }
+            console.log("total iterations: " + totalIter/10**6);
         }
     
         function getMousePos(canvas, e) {
@@ -160,17 +135,10 @@
             var zoomFactor = 2;
             if(e.ctrlKey) {
                 zoomFactor = 0.5;
-                maxIterations /= 0.5;
-                if(maxIterations < 100) { maxIterations = 100;}
-            } else if(e.shiftKey) {
-                zoomFactor = 1;
-            } else {
-                maxIterations *= 2;
-                if(maxIterations > 2000) {
-                    maxIterations = 2000;
-                }
             }
-            console.log(maxIterations);
+            if(e.shiftKey) {
+                zoomFactor = 1;
+            }
             zoomFractal(pos.x, pos.y, zoomFactor);
             Render();
             UpdateCanvas();
