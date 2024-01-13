@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <style>
+            .lcolumn { 
+                float: left;
+                width: 1205px;
+            }
+            .rcolumn {
+                float: left;
+            }
+            .row:after {
+                content: "";
+                display: table;
+                clear: both;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="row">
+            <div class="lcolumn">
+                <canvas height="800" id="canvas" style="border: 1px grey solid" width="800"></canvas>
+            </div>
+            <div class="rcolumn">
+                hello
+            </div>
+        </div>
+     </body>
+    <script type="module">
+        import { MapRange, ComplexNumber } from "./models.mjs";
+        function getOffscreenCanvas(width, height) {
+            if(!document.getElementById('offscreencanvas')) {
+                var offScreenCanvas = document.createElement('canvas');
+                offScreenCanvas.id = 'offscreencanvas';
+                offScreenCanvas.getContext('2d');
+                offScreenCanvas.width = width;
+                offScreenCanvas.height = height;
+                return offScreenCanvas; //return canvas element
+            }else{
+                return document.getElementById('offscreencanvas');
+            }
+        }
+
+        function copyToOnScreen(offScreenCanvas) {
+            var onScreenContext = document.getElementById('canvas').getContext('2d');
+            onScreenContext.drawImage(offScreenCanvas, 0, 0);
+        }
+        
+        var canvas = document.getElementById("canvas");
+        var canvas_context = canvas.getContext("2d");
+        var canvas_buffer = canvas_context.getImageData(0, 0, canvas.width, canvas.height);
+        var offscreenCanvas = getOffscreenCanvas(canvas.width, canvas.height);
+        var offscreenContext = offscreenCanvas.getContext("2d");
+        var offscreenBuffer = offscreenContext.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        var canvas_pitch = canvas_buffer.width * 4;
+        
+        var palette = [];
+        var GeneratePalette = function() {
+          var roffset = 24;
+          var goffset = 16;
+          var boffset = 0;
+          for (var i=0; i<256; i++) {
+              palette[i] = { r:roffset, g:goffset, b:boffset};
+   
+              if (i < 64) {
+                  roffset += 3;
+              } else if (i<128) {
+                  goffset += 3;
+              } else if (i<192) {
+                  boffset += 3;
+              }
+          }
+        }
+
+        var PutPixel = function(x, y, color) {
+            if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
+                return;
+            }
+
+            var offset = 4*Math.round(x) + canvas_pitch*Math.round(y);
+            offscreenBuffer.data[offset++] = color[0];
+            offscreenBuffer.data[offset++] = color[1];
+            offscreenBuffer.data[offset++] = color[2];
+            offscreenBuffer.data[offset] = 255; // Alpha = 255 (full opacity)
+        }
+
+        var UpdateCanvas = function(y) {
+            canvas_context.drawImage(offscreenContext.getImageData(0,y,800,1), 0, y, 800, 1, );
+        }
+
+
+
+        var mr = new MapRange(canvas.width, canvas.height, -2, .47, -1.2, 1.2);
+
+        GeneratePalette();
+
+        // for(var i =0; i<.1; i+=.01) {
+        //     var cn = mr.pixelToComplex(300+i, 298);
+        //     var [x, y] = mr.complexToPixel(cn);
+        //     console.log(cn);
+        //     PutPixel(x, y, [0,0,0]);
+        // }
+        var zoom = 1;
+        var maxIterations =  1024
+        const worker = new Worker('fractalworker.js', {type: "module"});
+
+        worker.onmessage = function(e) {
+            var iterScaler = 255/maxIterations;
+            var y=e.data[0].y
+            for(const pixel of e.data) {
+                var scaledIteration = Math.floor(pixel.iteration * iterScaler);
+                var color = pixel.iteration == maxIterations ? {r: 255, g: 255, b: 255} : palette[scaledIteration];
+                PutPixel(pixel.x, pixel.y, [color.r, color.g, color.b]);
+            }
+            UpdateCanvas(y);   
+        }
+    
+        var Render = function() {
+            for(var y = 0; y<canvas.height; y++) {
+                var line = [];
+                for(var x=0; x<canvas.width; x++) {
+                    var iter = mr.pixelToComplex(x, y);
+                    line.push({x: x, y: y, value: iter, maxIterations: maxIterations});     
+                }
+                worker.postMessage(line);
+            }
+        }
+    
+        function getMousePos(canvas, e) {
+            var rect = canvas.getBoundingClientRect();
+            return {
+                x: Math.round((e.clientX - rect.left)/(rect.right - rect.left)*canvas.width),
+                y: Math.round((e.clientY - rect.top)/(rect.bottom - rect.top)*canvas.height)
+            }
+        }
+
+        function zoomFractal(x, y, factor) {
+            var horizDelta = canvas.width / (2 * factor)
+            var vertDelta = canvas.height / (2 * factor)
+            var newLeftUp = mr.pixelToComplex(x - horizDelta, y - vertDelta);
+            var newRightBottom = mr.pixelToComplex(x + horizDelta, y + vertDelta);
+            mr = new MapRange(canvas.width, canvas.height, newLeftUp.real, newRightBottom.real, newRightBottom.imaginary, newLeftUp.imaginary);
+        }
+
+        var onMouseMove = function(e) {
+            var pos = getMousePos(canvas, e);
+            //console.log(mr.pixelToComplex(pos.x, pos.y));
+        }
+
+        var onMouseDown = function(e) {
+            var pos = getMousePos(canvas, e);
+            var zoomFactor = 2;
+            if(e.ctrlKey) {
+                zoomFactor = 0.5;
+            }
+            if(e.shiftKey) {
+                zoomFactor = 1;
+            }
+            zoomFractal(pos.x, pos.y, zoomFactor);
+            Render();
+            UpdateCanvas();
+        }
+
+        var Init = function() {
+            canvas.addEventListener("mousemove", onMouseMove);
+            canvas.addEventListener("mousedown", onMouseDown);
+        }  
+
+        Init();
+        Render();
+        UpdateCanvas();
+    </script>
+</html>
