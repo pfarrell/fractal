@@ -2,4 +2,5 @@
 pub mod color;
 pub mod escape;
 pub mod newton;
+pub mod render;
 pub mod viewport;
