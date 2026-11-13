@@ -5,8 +5,9 @@ use crate::engine::escape::{FractalKind, Sample, iterate, orbit};
 use crate::engine::jobs::{RenderRequest, RenderSlot};
 use crate::engine::render::F64Sampler;
 use crate::engine::viewport::{MaxIter, Viewport};
+use crate::ui::ifs_table::IfsState;
 use crate::ui::julia::{JuliaAction, JuliaPanel};
-use crate::ui::panel::{explore_panel, orbit_panel};
+use crate::ui::panel::{explore_panel, orbit_panel, palette_combo, threads_slider};
 use crate::ui::view::{draw_orbit, show_view};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use num_complex::Complex64;
@@ -102,6 +103,7 @@ pub struct FractalApp {
     cursor: Option<Complex64>,
     julia: JuliaPanel,
     orbit: Option<OrbitState>,
+    ifs: IfsState,
 }
 
 impl FractalApp {
@@ -118,6 +120,7 @@ impl FractalApp {
             cursor: None,
             julia: JuliaPanel::new(&cc.egui_ctx, max_threads),
             orbit: None,
+            ifs: IfsState::new(&cc.egui_ctx, max_threads),
         }
     }
 
@@ -188,14 +191,14 @@ impl FractalApp {
     }
 }
 
-impl eframe::App for FractalApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.receive(&ctx);
+impl FractalApp {
+    fn escape_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.receive(ctx);
 
         egui::Panel::left("controls")
             .default_size(260.0)
             .show(ui, |ui| {
+                self.mode_switch(ui);
                 let ch = explore_panel(
                     ui,
                     &mut self.explore,
@@ -205,6 +208,7 @@ impl eframe::App for FractalApp {
                 if let Some(n) = ch.threads {
                     self.main_slot.set_threads(n);
                     self.julia.set_main_threads(n);
+                    self.ifs.set_threads(n);
                     self.needs_render = true;
                 }
                 if ch.render {
@@ -212,7 +216,7 @@ impl eframe::App for FractalApp {
                     self.refresh_orbit();
                 }
                 if ch.color {
-                    self.recolor(&ctx);
+                    self.recolor(ctx);
                     self.julia.invalidate();
                 }
                 if self.explore.kind == FractalKind::Mandelbrot {
@@ -281,8 +285,72 @@ impl eframe::App for FractalApp {
                 }
             });
 
-        if self.needs_render {
+        if self.needs_render && self.mode == Mode::Escape {
             self.submit();
+        }
+    }
+}
+
+impl FractalApp {
+    /// "Escape-time | IFS" switch at the top of the left panel.
+    fn mode_switch(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let before = self.mode;
+            ui.selectable_value(&mut self.mode, Mode::Escape, "Escape-time");
+            ui.selectable_value(&mut self.mode, Mode::Ifs, "IFS");
+            if self.mode != before {
+                match self.mode {
+                    Mode::Escape => {
+                        self.ifs.cancel();
+                        self.needs_render = true;
+                    }
+                    Mode::Ifs => {
+                        self.main_slot.cancel();
+                        self.julia.cancel();
+                        self.ifs.mark_dirty();
+                    }
+                }
+            }
+        });
+        ui.separator();
+    }
+
+    fn ifs_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        egui::Panel::left("controls")
+            .default_size(260.0)
+            .show(ui, |ui| {
+                self.mode_switch(ui);
+                self.ifs.controls(ui);
+                ui.separator();
+                if palette_combo(ui, &mut self.explore.color.palette) {
+                    self.ifs.recolor(ctx, &self.explore.color);
+                }
+                if let Some(n) = threads_slider(ui, self.main_slot.threads(), self.max_threads) {
+                    self.main_slot.set_threads(n);
+                    self.julia.set_main_threads(n);
+                    self.ifs.set_threads(n);
+                }
+            });
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| match self.cursor {
+                Some(z) => ui.monospace(format!("x {:+.9}  y {:+.9}", z.re, z.im)),
+                None => ui.monospace("—"),
+            });
+        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                self.cursor = self.ifs.show_view(ui, &self.explore.color);
+            });
+    }
+}
+
+impl eframe::App for FractalApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        match self.mode {
+            Mode::Escape => self.escape_ui(ui, &ctx),
+            Mode::Ifs => self.ifs_ui(ui, &ctx),
         }
     }
 }

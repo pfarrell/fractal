@@ -111,15 +111,7 @@ pub fn explore_panel(
 
     ui.separator();
     ui.heading("Color");
-    egui::ComboBox::from_id_salt("palette")
-        .selected_text(state.color.palette.label())
-        .show_ui(ui, |ui| {
-            for p in PaletteId::ALL {
-                ch.color |= ui
-                    .selectable_value(&mut state.color.palette, p, p.label())
-                    .changed();
-            }
-        });
+    ch.color |= palette_combo(ui, &mut state.color.palette);
     ch.color |= ui
         .add(egui::Slider::new(&mut state.color.offset, 0.0..=1.0).text("offset"))
         .changed();
@@ -133,13 +125,7 @@ pub fn explore_panel(
 
     ui.separator();
     ui.heading("Performance");
-    let mut n = threads;
-    if ui
-        .add(egui::Slider::new(&mut n, 1..=max_threads).text("threads"))
-        .changed()
-    {
-        ch.threads = Some(n);
-    }
+    ch.threads = threads_slider(ui, threads, max_threads);
     match state.last_render {
         Some((elapsed, threads, pixels)) => {
             let secs = elapsed.as_secs_f64().max(1e-9);
@@ -179,4 +165,25 @@ pub fn orbit_panel(ui: &mut egui::Ui, orbit: &OrbitState) -> bool {
         ui.monospace(format!("z{i:<2} {:+.5} {:+.5}i", z.re, z.im));
     }
     ui.button("Clear orbit").clicked()
+}
+
+/// Palette picker. Returns true if changed.
+pub fn palette_combo(ui: &mut egui::Ui, palette: &mut PaletteId) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_salt("palette")
+        .selected_text(palette.label())
+        .show_ui(ui, |ui| {
+            for p in PaletteId::ALL {
+                changed |= ui.selectable_value(palette, p, p.label()).changed();
+            }
+        });
+    changed
+}
+
+/// Thread-count slider. Returns the new count if changed.
+pub fn threads_slider(ui: &mut egui::Ui, threads: usize, max_threads: usize) -> Option<usize> {
+    let mut n = threads;
+    ui.add(egui::Slider::new(&mut n, 1..=max_threads).text("threads"))
+        .changed()
+        .then_some(n)
 }

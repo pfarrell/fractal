@@ -1,6 +1,6 @@
 //! Background render jobs.
 //!
-//! A [`RenderSlot`] owns one view's rendering: its own rayon thread pool,
+//! A [`JobSlot`] (and the escape-time [`RenderSlot`] built on it) owns one view's rendering: its own rayon thread pool,
 //! a generation counter, and a channel back to the UI. Submitting a new
 //! request bumps the generation, which cancels whatever is still running
 //! for that slot (see [`CancelToken`]). Results from stale generations are
@@ -40,15 +40,6 @@ const PREVIEW_DIVISOR: usize = 4;
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
 
-pub struct RenderSlot {
-    pool: Arc<rayon::ThreadPool>,
-    threads: usize,
-    generation: Arc<AtomicU64>,
-    tx: Sender<RenderOutput>,
-    rx: Mutex<Receiver<RenderOutput>>,
-    notify: Notify,
-}
-
 fn build_pool(threads: usize) -> Arc<rayon::ThreadPool> {
     Arc::new(
         rayon::ThreadPoolBuilder::new()
@@ -58,9 +49,21 @@ fn build_pool(threads: usize) -> Arc<rayon::ThreadPool> {
     )
 }
 
-impl RenderSlot {
-    /// `notify` is called (from a worker thread) after every finished pass;
-    /// the UI uses it to request a repaint.
+/// A background job runner with "newest wins" semantics: its own thread
+/// pool, a generation counter for cancellation, and a channel of results
+/// tagged with the generation that produced them.
+pub struct JobSlot<T> {
+    pool: Arc<rayon::ThreadPool>,
+    threads: usize,
+    generation: Arc<AtomicU64>,
+    tx: Sender<(u64, T)>,
+    rx: Mutex<Receiver<(u64, T)>>,
+    notify: Notify,
+}
+
+impl<T: Send + 'static> JobSlot<T> {
+    /// `notify` is called (from a worker thread) after every result; the
+    /// UI uses it to request a repaint.
     pub fn new(threads: usize, notify: Notify) -> Self {
         let (tx, rx) = channel();
         Self {
@@ -73,16 +76,76 @@ impl RenderSlot {
         }
     }
 
-    /// Cancel any in-flight render and start this one. Returns its generation.
-    pub fn submit(&self, req: RenderRequest) -> u64 {
+    /// Cancel any in-flight job and start `job` on the pool. The job gets
+    /// the pool (to run parallel work on), a cancel token, and an `emit`
+    /// callback to send results (it may emit more than once). Returns the
+    /// job's generation.
+    pub fn run<F>(&self, job: F) -> u64
+    where
+        F: FnOnce(&rayon::ThreadPool, &CancelToken, &mut dyn FnMut(T)) + Send + 'static,
+    {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let token = CancelToken::new(self.generation.clone(), generation);
         let pool = self.pool.clone();
         let tx = self.tx.clone();
         let notify = self.notify.clone();
-        let threads = self.threads;
-
         self.pool.spawn(move || {
+            let mut emit = |result: T| {
+                if tx.send((generation, result)).is_ok() {
+                    notify();
+                }
+            };
+            job(&pool, &token, &mut emit);
+        });
+        generation
+    }
+
+    /// Cancel any in-flight job without starting a new one.
+    pub fn cancel(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// All results received for the current generation, oldest first.
+    /// Results from older generations are discarded.
+    pub fn poll_all(&self) -> Vec<T> {
+        let current = self.generation.load(Ordering::Relaxed);
+        let rx = self.rx.lock().expect("receiver lock poisoned");
+        rx.try_iter()
+            .filter(|(g, _)| *g == current)
+            .map(|(_, r)| r)
+            .collect()
+    }
+
+    /// The newest result for the current generation, if any arrived.
+    pub fn poll(&self) -> Option<T> {
+        self.poll_all().pop()
+    }
+
+    /// Rebuild the pool with a different thread count. Cancels in-flight work.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.cancel();
+        self.threads = threads.max(1);
+        self.pool = build_pool(self.threads);
+    }
+
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+}
+
+/// Renders escape-time images, optionally as a quick preview pass followed
+/// by the full-resolution pass.
+pub struct RenderSlot(JobSlot<RenderOutput>);
+
+impl RenderSlot {
+    pub fn new(threads: usize, notify: Notify) -> Self {
+        Self(JobSlot::new(threads, notify))
+    }
+
+    /// Cancel any in-flight render and start this one. Returns its generation.
+    pub fn submit(&self, req: RenderRequest) -> u64 {
+        let threads = self.0.threads();
+        self.0.run(move |pool, token, emit| {
             let mut passes = Vec::with_capacity(2);
             let v = req.view;
             if req.progressive && v.height >= PREVIEW_MIN_HEIGHT {
@@ -96,52 +159,38 @@ impl RenderSlot {
 
             for (view, final_pass) in passes {
                 let start = Instant::now();
-                let Some(samples) = render(req.sampler.as_ref(), &view, &pool, &token) else {
+                let Some(samples) = render(req.sampler.as_ref(), &view, pool, token) else {
                     return; // superseded by a newer request
                 };
-                let out = RenderOutput {
-                    generation,
+                emit(RenderOutput {
+                    generation: token.generation(),
                     view,
                     samples,
                     elapsed: start.elapsed(),
                     threads,
                     final_pass,
-                };
-                if tx.send(out).is_err() {
-                    return; // slot dropped
-                }
-                notify();
+                });
             }
-        });
-        generation
+        })
     }
 
-    /// Cancel any in-flight render without starting a new one.
     pub fn cancel(&self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.0.cancel();
     }
 
-    /// All outputs received for the current generation, oldest first.
-    /// Outputs from older generations are discarded.
     pub fn poll_all(&self) -> Vec<RenderOutput> {
-        let current = self.generation.load(Ordering::Relaxed);
-        let rx = self.rx.lock().expect("receiver lock poisoned");
-        rx.try_iter().filter(|o| o.generation == current).collect()
+        self.0.poll_all()
     }
 
-    /// The newest output for the current generation, if any arrived.
     pub fn poll(&self) -> Option<RenderOutput> {
-        self.poll_all().pop()
+        self.0.poll()
     }
 
-    /// Rebuild the pool with a different thread count. Cancels in-flight work.
     pub fn set_threads(&mut self, threads: usize) {
-        self.cancel();
-        self.threads = threads.max(1);
-        self.pool = build_pool(self.threads);
+        self.0.set_threads(threads);
     }
 
     pub fn threads(&self) -> usize {
-        self.threads
+        self.0.threads()
     }
 }

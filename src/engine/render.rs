@@ -52,6 +52,11 @@ impl CancelToken {
         Self::new(Arc::new(AtomicU64::new(0)), 0)
     }
 
+    /// The generation this token belongs to.
+    pub fn generation(&self) -> u64 {
+        self.mine
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.generation.load(Ordering::Relaxed) != self.mine
     }
