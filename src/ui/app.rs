@@ -7,6 +7,7 @@ use crate::engine::render::F64Sampler;
 use crate::engine::viewport::{MaxIter, Viewport};
 use crate::ui::ifs_table::IfsState;
 use crate::ui::julia::{JuliaAction, JuliaPanel};
+use crate::ui::movie_dialog::{MovieDialog, MovieStart};
 use crate::ui::panel::{explore_panel, orbit_panel, palette_combo, threads_slider};
 use crate::ui::view::{draw_orbit, show_view};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -104,6 +105,7 @@ pub struct FractalApp {
     julia: JuliaPanel,
     orbit: Option<OrbitState>,
     ifs: IfsState,
+    movie: MovieDialog,
 }
 
 impl FractalApp {
@@ -121,6 +123,7 @@ impl FractalApp {
             julia: JuliaPanel::new(&cc.egui_ctx, max_threads),
             orbit: None,
             ifs: IfsState::new(&cc.egui_ctx, max_threads),
+            movie: MovieDialog::default(),
         }
     }
 
@@ -194,6 +197,11 @@ impl FractalApp {
 impl FractalApp {
     fn escape_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.receive(ctx);
+        let movie_was_open = self.movie.is_open();
+        self.movie.show(ctx, self.max_threads);
+        if movie_was_open && !self.movie.is_open() {
+            self.needs_render = true; // the dialog cancelled the live renders
+        }
 
         egui::Panel::left("controls")
             .default_size(260.0)
@@ -218,6 +226,18 @@ impl FractalApp {
                 if ch.color {
                     self.recolor(ctx);
                     self.julia.invalidate();
+                }
+                if ch.open_movie {
+                    let e = &self.explore;
+                    let start = MovieStart {
+                        kind: e.kind,
+                        view: e.view,
+                        max_iter: e.max_iter,
+                        color: e.color,
+                    };
+                    self.movie.open(start, self.orbit.as_ref().map(|o| o.point));
+                    self.main_slot.cancel();
+                    self.julia.cancel();
                 }
                 if self.explore.kind == FractalKind::Mandelbrot {
                     ui.checkbox(&mut self.julia.visible, "Show Julia panel");
@@ -285,7 +305,7 @@ impl FractalApp {
                 }
             });
 
-        if self.needs_render && self.mode == Mode::Escape {
+        if self.needs_render && self.mode == Mode::Escape && !self.movie.is_open() {
             self.submit();
         }
     }

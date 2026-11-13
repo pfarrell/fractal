@@ -17,6 +17,8 @@ pub struct PanelChanges {
     pub color: bool,
     /// New thread count requested.
     pub threads: Option<usize>,
+    /// "Movie…" clicked.
+    pub open_movie: bool,
 }
 
 /// Controls for the escape-time explorer. `threads` is the current main
@@ -141,10 +143,13 @@ pub fn explore_panel(
     }
 
     ui.separator();
-    if ui.button("Reset view").clicked() {
-        state.view = state.kind.default_view(state.view.width, state.view.height);
-        ch.render = true;
-    }
+    ui.horizontal(|ui| {
+        if ui.button("Reset view").clicked() {
+            state.view = state.kind.default_view(state.view.width, state.view.height);
+            ch.render = true;
+        }
+        ch.open_movie = ui.button("Movie…").clicked();
+    });
     ch
 }
 
