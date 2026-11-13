@@ -3,6 +3,7 @@ pub mod color;
 pub mod escape;
 pub mod ifs;
 pub mod jobs;
+pub mod movie;
 pub mod newton;
 pub mod render;
 pub mod viewport;
