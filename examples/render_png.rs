@@ -2,9 +2,11 @@
 //!
 //! cargo run --release --example render_png -- <kind> <re> <im> <span> <out.png> [max_iter]
 //! kind: mandelbrot | julia | ship | tricorn | multibrot3 | newton3 | newton4 | newtoncycle
+//! or:   cargo run --release --example render_png -- ifs <preset 0-3> <out.png>
 
-use fractal_explorer::engine::color::{ColorSettings, colorize};
+use fractal_explorer::engine::color::{ColorSettings, colorize, colorize_density};
 use fractal_explorer::engine::escape::FractalKind;
+use fractal_explorer::engine::ifs::{IfsSystem, chaos_game};
 use fractal_explorer::engine::newton::NewtonPoly;
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, render};
 use fractal_explorer::engine::viewport::Viewport;
@@ -12,6 +14,25 @@ use num_complex::Complex64;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(String::as_str) == Some("ifs") {
+        let sys = &IfsSystem::presets()[a[2].parse::<usize>().expect("preset")];
+        let view = sys.fit_view(800, 600);
+        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let t = std::time::Instant::now();
+        let d = chaos_game(sys, &view, 20_000_000, 1, &pool, &CancelToken::never()).unwrap();
+        eprintln!("{}: 20M points in {:?}", sys.name, t.elapsed());
+        let mut px = vec![[0u8; 4]; d.counts.len()];
+        colorize_density(&d.counts, &ColorSettings::default(), &mut px);
+        image::save_buffer(
+            &a[3],
+            px.as_flattened(),
+            800,
+            600,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+        return;
+    }
     if a.len() < 6 {
         eprintln!("usage: render_png <kind> <re> <im> <span> <out.png> [max_iter]");
         std::process::exit(2);

@@ -126,6 +126,11 @@ pub fn colorize(samples: &[Sample], s: &ColorSettings, out: &mut [[u8; 4]]) {
     }
 }
 
+/// The densest IFS pixels map to this gradient position. Gradients are
+/// cyclic, so running all the way to 1.0 would wrap the brightest pixels
+/// back to the dark starting color.
+pub const DENSITY_TOP: f32 = 0.6;
+
 /// Color an IFS hit-count buffer on a log scale (densities span many
 /// orders of magnitude). `out` must be the same length as `counts`.
 pub fn colorize_density(counts: &[u32], s: &ColorSettings, out: &mut [[u8; 4]]) {
@@ -137,7 +142,7 @@ pub fn colorize_density(counts: &[u32], s: &ColorSettings, out: &mut [[u8; 4]]) 
         *px = if n == 0 {
             [0, 0, 0, 255]
         } else {
-            rgba(palette.at(((1.0 + n as f32).ln() / denom).min(0.999)))
+            rgba(palette.at((1.0 + n as f32).ln() / denom * DENSITY_TOP))
         };
     }
 }
@@ -195,7 +200,7 @@ mod tests {
         let mut out = [[0u8; 4]; 3];
         colorize_density(&[0, 5, 100], &s, &mut out);
         assert_eq!(out[0], BLACK);
-        let top = Palette::get(s.palette).at(0.999);
+        let top = Palette::get(s.palette).at(DENSITY_TOP);
         assert_eq!(out[2], [top[0], top[1], top[2], 255]);
     }
 
