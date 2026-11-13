@@ -1,10 +1,12 @@
 //! Top-level application state and layout.
 
+use crate::engine::bookmark::BookmarkView;
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate, orbit};
 use crate::engine::jobs::{RenderRequest, RenderSlot};
 use crate::engine::render::F64Sampler;
 use crate::engine::viewport::{MaxIter, Viewport};
+use crate::ui::bookmarks::BookmarksUi;
 use crate::ui::ifs_table::IfsState;
 use crate::ui::julia::{JuliaAction, JuliaPanel};
 use crate::ui::movie_dialog::{MovieDialog, MovieStart};
@@ -106,6 +108,7 @@ pub struct FractalApp {
     orbit: Option<OrbitState>,
     ifs: IfsState,
     movie: MovieDialog,
+    bookmarks: BookmarksUi,
 }
 
 impl FractalApp {
@@ -124,6 +127,7 @@ impl FractalApp {
             orbit: None,
             ifs: IfsState::new(&cc.egui_ctx, max_threads),
             movie: MovieDialog::default(),
+            bookmarks: BookmarksUi::default(),
         }
     }
 
@@ -178,8 +182,12 @@ impl FractalApp {
         }
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if ui.button("Bookmarks").clicked() {
+                self.bookmarks.open = !self.bookmarks.open;
+            }
+            ui.separator();
             match self.cursor {
                 Some(z) => ui.monospace(format!("{:+.12} {:+.12}i", z.re, z.im)),
                 None => ui.monospace("—"),
@@ -198,7 +206,8 @@ impl FractalApp {
     fn escape_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.receive(ctx);
         let movie_was_open = self.movie.is_open();
-        self.movie.show(ctx, self.max_threads);
+        self.movie
+            .show(ctx, self.max_threads, &self.bookmarks.items);
         if movie_was_open && !self.movie.is_open() {
             self.needs_render = true; // the dialog cancelled the live renders
         }
@@ -352,9 +361,15 @@ impl FractalApp {
                 }
             });
         egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| match self.cursor {
-                Some(z) => ui.monospace(format!("x {:+.9}  y {:+.9}", z.re, z.im)),
-                None => ui.monospace("—"),
+            ui.horizontal(|ui| {
+                if ui.button("Bookmarks").clicked() {
+                    self.bookmarks.open = !self.bookmarks.open;
+                }
+                ui.separator();
+                match self.cursor {
+                    Some(z) => ui.monospace(format!("x {:+.9}  y {:+.9}", z.re, z.im)),
+                    None => ui.monospace("—"),
+                }
             });
         });
         egui::CentralPanel::default()
@@ -365,9 +380,76 @@ impl FractalApp {
     }
 }
 
+impl FractalApp {
+    /// The picture on screen, as a bookmark.
+    fn current_bookmark_view(&self) -> BookmarkView {
+        let e = &self.explore;
+        match self.mode {
+            Mode::Escape => BookmarkView::Escape {
+                kind: e.kind,
+                center: e.view.center,
+                span: e.view.span,
+                max_iter: e.max_iter,
+                color: e.color,
+            },
+            Mode::Ifs => BookmarkView::Ifs {
+                system: self.ifs.system.clone(),
+                center: self.ifs.view.center,
+                span: self.ifs.view.span,
+                points: self.ifs.points,
+                color: e.color,
+            },
+        }
+    }
+
+    fn go_to(&mut self, view: BookmarkView) {
+        match view {
+            BookmarkView::Escape {
+                kind,
+                center,
+                span,
+                max_iter,
+                color,
+            } => {
+                self.mode = Mode::Escape;
+                self.ifs.cancel();
+                let e = &mut self.explore;
+                e.kind = kind;
+                e.view.center = center;
+                e.view.span = span;
+                e.max_iter = max_iter;
+                e.color = color;
+                self.orbit = None;
+                self.needs_render = true;
+            }
+            BookmarkView::Ifs {
+                system,
+                center,
+                span,
+                points,
+                color,
+            } => {
+                self.mode = Mode::Ifs;
+                self.main_slot.cancel();
+                self.julia.cancel();
+                self.ifs.system = system;
+                self.ifs.view.center = center;
+                self.ifs.view.span = span;
+                self.ifs.points = points;
+                self.explore.color = color;
+                self.ifs.mark_dirty();
+            }
+        }
+    }
+}
+
 impl eframe::App for FractalApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let current = self.current_bookmark_view();
+        if let Some(view) = self.bookmarks.show(&ctx, || current) {
+            self.go_to(view);
+        }
         match self.mode {
             Mode::Escape => self.escape_ui(ui, &ctx),
             Mode::Ifs => self.ifs_ui(ui, &ctx),

@@ -1,5 +1,6 @@
 //! Modal dialog for exporting a zoom movie.
 
+use crate::engine::bookmark::{Bookmark, BookmarkView};
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, render_movie};
@@ -191,7 +192,7 @@ impl MovieDialog {
     }
 
     /// Show the dialog (if open). `threads` = cores to render with.
-    pub fn show(&mut self, ctx: &egui::Context, threads: usize) {
+    pub fn show(&mut self, ctx: &egui::Context, threads: usize, bookmarks: &[Bookmark]) {
         if !self.open {
             return;
         }
@@ -209,7 +210,7 @@ impl MovieDialog {
                 start.view.center.im,
                 start.view.magnification()
             ));
-            ui.add_enabled_ui(!running, |ui| self.settings(ui));
+            ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks));
             ui.separator();
             self.status_ui(ui);
             ui.horizontal(|ui| {
@@ -238,10 +239,32 @@ impl MovieDialog {
         }
     }
 
-    fn settings(&mut self, ui: &mut egui::Ui) {
+    fn settings(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark]) {
         egui::Grid::new("movie_settings")
             .num_columns(2)
             .show(ui, |ui| {
+                let targets: Vec<(&str, Complex64, f64)> = bookmarks
+                    .iter()
+                    .filter_map(|b| match b.view {
+                        BookmarkView::Escape { center, span, .. } => {
+                            Some((b.name.as_str(), center, span))
+                        }
+                        BookmarkView::Ifs { .. } => None,
+                    })
+                    .collect();
+                if !targets.is_empty() {
+                    ui.label("Target from bookmark");
+                    egui::ComboBox::from_id_salt("movie_bookmark")
+                        .selected_text("choose…")
+                        .show_ui(ui, |ui| {
+                            for (name, center, span) in &targets {
+                                if ui.selectable_label(false, *name).clicked() {
+                                    self.set_target(*center, DEFAULT_SPAN / span);
+                                }
+                            }
+                        });
+                    ui.end_row();
+                }
                 ui.label("Zoom toward");
                 ui.horizontal(|ui| {
                     ui.add(

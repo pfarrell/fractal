@@ -1,4 +1,5 @@
 //! UI-free fractal engine: math, coloring, parallel rendering, movies.
+pub mod bookmark;
 pub mod color;
 pub mod escape;
 pub mod ifs;
