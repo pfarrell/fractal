@@ -93,6 +93,8 @@ pub struct IfsState {
     texture: Option<TextureHandle>,
     pixels: Vec<[u8; 4]>,
     needs_render: bool,
+    /// The view has been framed or set deliberately (don't auto-fit again).
+    placed: bool,
 }
 
 impl IfsState {
@@ -111,6 +113,7 @@ impl IfsState {
             texture: None,
             pixels: Vec::new(),
             needs_render: true,
+            placed: false,
         }
     }
 
@@ -126,6 +129,7 @@ impl IfsState {
     /// Fit the view to the attractor (keeping the current pixel size).
     pub fn fit(&mut self) {
         self.view = self.system.fit_view(self.view.width, self.view.height);
+        self.placed = !self.view.is_empty();
         self.needs_render = true;
     }
 
@@ -191,6 +195,28 @@ impl IfsState {
         }
     }
 
+    /// Set the view's center and span (e.g. from a bookmark).
+    pub fn set_view(&mut self, center: Complex64, span: f64) {
+        self.view.center = center;
+        self.view.span = span;
+        self.placed = true;
+        self.needs_render = true;
+    }
+
+    /// Track the on-screen size. The first time there is a real size, and
+    /// nothing has placed the view yet, frame the whole attractor.
+    pub fn resize(&mut self, width: usize, height: usize) {
+        if (self.view.width, self.view.height) == (width, height) {
+            return;
+        }
+        self.view.width = width;
+        self.view.height = height;
+        if !self.placed && !self.view.is_empty() {
+            self.fit();
+        }
+        self.needs_render = true;
+    }
+
     pub fn mark_dirty(&mut self) {
         self.needs_render = true;
     }
@@ -208,15 +234,7 @@ impl IfsState {
         let image = self.texture.as_ref().map(|t| (t, &self.density_view));
         let resp = show_view(ui, image, &mut self.view);
         let (w, h) = resp.mapping.pixel_size();
-        if (self.view.width, self.view.height) != (w, h) {
-            let first = self.view.is_empty();
-            self.view.width = w;
-            self.view.height = h;
-            if first {
-                self.fit();
-            }
-            self.needs_render = true;
-        }
+        self.resize(w, h);
         self.needs_render |= resp.view_changed;
         if self.show_outlines {
             draw_outlines(ui, &resp.mapping, &self.view, &self.system);
@@ -244,12 +262,90 @@ impl IfsState {
 fn draw_outlines(ui: &egui::Ui, mapping: &ScreenMapping, view: &Viewport, sys: &IfsSystem) {
     let painter = ui.painter_at(mapping.rect);
     for i in 0..sys.maps.len() {
-        let pts: Vec<egui::Pos2> = sys
-            .map_outline(i)
-            .iter()
-            .map(|&(x, y)| mapping.to_screen(view, Complex64::new(x, y)))
-            .collect();
-        let stroke = Stroke::new(1.5, MAP_COLORS[i % MAP_COLORS.len()]);
-        painter.add(egui::Shape::closed_line(pts, stroke));
+        if let Some(pts) = outline_points(mapping, view, sys.map_outline(i)) {
+            let stroke = Stroke::new(1.5, MAP_COLORS[i % MAP_COLORS.len()]);
+            painter.add(egui::Shape::closed_line(pts, stroke));
+        }
+    }
+}
+
+/// Screen points for an outline, or `None` if any corner is non-finite or
+/// absurdly far off screen (a map edited to diverge). Such coordinates
+/// would otherwise reach egui's tessellator as inf/NaN and panic.
+fn outline_points(
+    mapping: &ScreenMapping,
+    view: &Viewport,
+    quad: [(f64, f64); 4],
+) -> Option<Vec<egui::Pos2>> {
+    let limit = mapping
+        .rect
+        .expand(mapping.rect.width().max(mapping.rect.height()) * 4.0);
+    quad.iter()
+        .map(|&(x, y)| {
+            let p = mapping.to_screen(view, Complex64::new(x, y));
+            (p.x.is_finite() && p.y.is_finite() && limit.contains(p)).then_some(p)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Pos2, Rect};
+
+    fn mapping() -> ScreenMapping {
+        ScreenMapping {
+            rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0)),
+            ppp: 1.0,
+        }
+    }
+
+    #[test]
+    fn diverging_outline_is_skipped() {
+        let mut sys = IfsSystem::sierpinski();
+        sys.maps[0].a = 5.0;
+        let view = IfsSystem::sierpinski().fit_view(800, 600);
+        assert!(outline_points(&mapping(), &view, sys.map_outline(0)).is_none());
+        let inf = [
+            (f64::INFINITY, 0.0),
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (f64::NAN, 1.0),
+        ];
+        assert!(outline_points(&mapping(), &view, inf).is_none());
+    }
+
+    #[test]
+    fn normal_outline_is_drawn() {
+        let sys = IfsSystem::sierpinski();
+        let view = sys.fit_view(800, 600);
+        assert_eq!(
+            outline_points(&mapping(), &view, sys.map_outline(0)).map(|p| p.len()),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn bookmarked_view_survives_first_sizing() {
+        let mut s = IfsState::new(&egui::Context::default(), 1);
+        s.set_view(Complex64::new(0.1, 7.0), 0.5);
+        s.resize(800, 600);
+        assert_eq!(
+            (s.view.center, s.view.span),
+            (Complex64::new(0.1, 7.0), 0.5)
+        );
+        s.resize(0, 0); // minimized
+        s.resize(800, 600); // restored
+        assert_eq!(
+            (s.view.center, s.view.span),
+            (Complex64::new(0.1, 7.0), 0.5)
+        );
+    }
+
+    #[test]
+    fn fresh_state_fits_on_first_sizing() {
+        let mut s = IfsState::new(&egui::Context::default(), 1);
+        s.resize(800, 600);
+        assert_eq!(s.view, s.system.fit_view(800, 600));
     }
 }

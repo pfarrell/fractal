@@ -198,3 +198,29 @@ fn cancel_stops_early() {
     );
     assert!(matches!(r, Err(MovieError::Cancelled)), "{r:?}");
 }
+
+#[test]
+fn validate_rejects_bad_output_paths() {
+    for out in ["/nonexistent-dir-xyz/o.mp4", "/tmp/o.txt", ""] {
+        let sp = spec(PathBuf::from(out));
+        assert!(
+            matches!(sp.validate(), Err(MovieError::Invalid(_))),
+            "{out:?}"
+        );
+    }
+}
+
+#[test]
+fn slider_max_end_zoom_is_accepted() {
+    use fractal_explorer::engine::viewport::{DEFAULT_SPAN, min_pixel_scale};
+    // Same computation as the dialog's slider maximum, over many targets.
+    for i in 0..6000 {
+        let mut sp = s();
+        sp.height = 1080;
+        sp.width = 1920;
+        sp.target = Complex64::new(-2.0 + i as f64 * 0.000_7, 0.3 - i as f64 * 0.000_11);
+        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(sp.target) * sp.height as f64);
+        sp.end_span = DEFAULT_SPAN / floor_mag;
+        assert!(sp.validate().is_ok(), "target {}", sp.target);
+    }
+}

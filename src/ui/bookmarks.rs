@@ -1,6 +1,6 @@
 //! The bookmarks window.
 
-use crate::engine::bookmark::{Bookmark, BookmarkStore, BookmarkView};
+use crate::engine::bookmark::{Bookmark, BookmarkError, BookmarkStore, BookmarkView};
 use eframe::egui;
 
 pub struct BookmarksUi {
@@ -9,7 +9,9 @@ pub struct BookmarksUi {
     store: BookmarkStore,
     /// Set if the file couldn't be loaded; saving is disabled until the
     /// user resets, so a damaged file is never silently overwritten.
-    error: Option<String>,
+    load_error: Option<String>,
+    /// The last save failed (the list stays usable).
+    save_error: Option<String>,
     name: String,
 }
 
@@ -29,15 +31,33 @@ impl BookmarksUi {
             open: false,
             items,
             store,
-            error,
+            load_error: error,
+            save_error: None,
             name: String::new(),
         }
     }
 
     fn persist(&mut self) {
-        if let Err(e) = self.store.save(&self.items) {
-            self.error = Some(e.to_string());
+        self.save_error = self.store.save(&self.items).err().map(|e| e.to_string());
+    }
+
+    /// Add a bookmark and save. A non-saveable bookmark is not kept.
+    pub fn add(&mut self, name: String, view: BookmarkView) {
+        self.items.push(Bookmark { name, view });
+        match self.store.save(&self.items) {
+            Ok(()) => self.save_error = None,
+            Err(e) => {
+                if matches!(e, BookmarkError::NonFinite) {
+                    self.items.pop(); // could never be saved; don't keep it
+                }
+                self.save_error = Some(e.to_string());
+            }
         }
+    }
+
+    pub fn delete(&mut self, i: usize) {
+        self.items.remove(i);
+        self.persist();
     }
 
     /// Show the window. `current` describes the picture on screen now.
@@ -56,7 +76,7 @@ impl BookmarksUi {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
-                if let Some(err) = &self.error {
+                if let Some(err) = &self.load_error {
                     ui.colored_label(egui::Color32::from_rgb(240, 90, 90), err);
                     ui.small(format!("File: {}", self.store.path().display()));
                     if ui
@@ -65,10 +85,10 @@ impl BookmarksUi {
                     {
                         match self.store.quarantine() {
                             Ok(()) => {
-                                self.error = None;
+                                self.load_error = None;
                                 self.items.clear();
                             }
-                            Err(e) => self.error = Some(e.to_string()),
+                            Err(e) => self.load_error = Some(e.to_string()),
                         }
                     }
                     return;
@@ -80,12 +100,8 @@ impl BookmarksUi {
                         .add_enabled(!name.is_empty(), egui::Button::new("Save current"))
                         .clicked()
                     {
-                        self.items.push(Bookmark {
-                            name,
-                            view: current(),
-                        });
+                        self.add(name, current());
                         self.name.clear();
-                        self.persist();
                     }
                 });
                 ui.separator();
@@ -109,11 +125,41 @@ impl BookmarksUi {
                     ui.label("No bookmarks yet.");
                 }
                 if let Some(i) = delete {
-                    self.items.remove(i);
-                    self.persist();
+                    self.delete(i);
+                }
+                if let Some(err) = &self.save_error {
+                    ui.colored_label(egui::Color32::from_rgb(240, 170, 40), err);
                 }
             });
         self.open = open;
         go
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::color::ColorSettings;
+    use crate::engine::escape::FractalKind;
+    use crate::engine::viewport::MaxIter;
+    use num_complex::Complex64;
+
+    fn view() -> BookmarkView {
+        BookmarkView::Escape {
+            kind: FractalKind::Mandelbrot,
+            center: Complex64::new(-0.5, 0.0),
+            span: 3.0,
+            max_iter: MaxIter::Auto,
+            color: ColorSettings::default(),
+        }
+    }
+
+    #[test]
+    fn failed_save_keeps_list_and_is_not_a_load_error() {
+        let mut ui = BookmarksUi::with_store(BookmarkStore::new("/proc/no/bookmarks.json".into()));
+        ui.add("home".into(), view());
+        assert_eq!(ui.items.len(), 1);
+        assert!(ui.load_error.is_none());
+        assert!(ui.save_error.is_some());
     }
 }

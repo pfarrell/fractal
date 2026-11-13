@@ -37,6 +37,8 @@ pub struct Bookmark {
 pub enum BookmarkError {
     Io(std::io::Error),
     Parse(serde_json::Error),
+    /// The bookmark contains NaN or infinity, which JSON can't store.
+    NonFinite,
 }
 
 impl std::fmt::Display for BookmarkError {
@@ -44,6 +46,7 @@ impl std::fmt::Display for BookmarkError {
         match self {
             BookmarkError::Io(e) => write!(f, "couldn't read or write bookmarks: {e}"),
             BookmarkError::Parse(e) => write!(f, "bookmarks file is damaged: {e}"),
+            BookmarkError::NonFinite => write!(f, "can't save a view containing NaN or infinity"),
         }
     }
 }
@@ -92,6 +95,11 @@ impl BookmarkStore {
             std::fs::create_dir_all(dir)?;
         }
         let text = serde_json::to_string_pretty(items).map_err(BookmarkError::Parse)?;
+        // serde_json writes NaN/inf as `null` and then can't read it back;
+        // check the round trip so a bad value never damages the file.
+        if serde_json::from_str::<Vec<Bookmark>>(&text).is_err() {
+            return Err(BookmarkError::NonFinite);
+        }
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &self.path)?;
@@ -169,6 +177,25 @@ mod tests {
         let store = BookmarkStore::new(dir.path().join("a/b/bookmarks.json"));
         store.save(&samples()).unwrap();
         assert_eq!(store.load().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn non_finite_bookmark_is_refused_and_file_stays_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BookmarkStore::new(dir.path().join("bookmarks.json"));
+        store.save(&samples()).unwrap();
+        let mut bad = samples();
+        bad[0].view = BookmarkView::Escape {
+            kind: FractalKind::Julia {
+                c: Complex64::new(f64::NAN, 0.0),
+            },
+            center: Complex64::new(0.0, 0.0),
+            span: 3.0,
+            max_iter: MaxIter::Auto,
+            color: ColorSettings::default(),
+        };
+        assert!(matches!(store.save(&bad), Err(BookmarkError::NonFinite)));
+        assert_eq!(store.load().unwrap(), samples());
     }
 
     #[test]

@@ -433,8 +433,7 @@ impl FractalApp {
                 self.main_slot.cancel();
                 self.julia.cancel();
                 self.ifs.system = system;
-                self.ifs.view.center = center;
-                self.ifs.view.span = span;
+                self.ifs.set_view(center, span);
                 self.ifs.points = points;
                 self.explore.color = color;
                 self.ifs.mark_dirty();

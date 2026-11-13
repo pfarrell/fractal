@@ -100,8 +100,31 @@ impl MovieSpec {
         if !spans_ok {
             return bad("zoom spans must be positive");
         }
-        if self.end_span / (self.height as f64) < min_pixel_scale(self.target) {
+        // Small tolerance so "as deep as allowed" survives float rounding.
+        if self.end_span / (self.height as f64) < min_pixel_scale(self.target) * (1.0 - 1e-9) {
             return bad("end zoom is past the f64 precision limit for this point");
+        }
+        self.validate_output()
+    }
+
+    /// Catch a bad output path before spending minutes rendering frames.
+    fn validate_output(&self) -> Result<(), MovieError> {
+        let bad = |why: String| Err(MovieError::Invalid(why));
+        let ext = self
+            .output
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        if !matches!(ext.as_deref(), Some("mp4" | "mkv" | "mov")) {
+            return bad("output file must end in .mp4, .mkv or .mov".into());
+        }
+        let dir = match self.output.parent() {
+            Some(d) if d.as_os_str().is_empty() => Path::new("."),
+            Some(d) => d,
+            None => return bad("output path has no folder".into()),
+        };
+        if !dir.is_dir() {
+            return bad(format!("folder {} does not exist", dir.display()));
         }
         Ok(())
     }
