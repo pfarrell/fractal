@@ -2,9 +2,10 @@
 
 use crate::engine::color::PaletteId;
 use crate::engine::escape::FractalKind;
+use crate::engine::escape::Sample;
 use crate::engine::newton::NewtonPoly;
 use crate::engine::viewport::MaxIter;
-use crate::ui::app::ExploreState;
+use crate::ui::app::{ExploreState, OrbitState};
 use eframe::egui;
 
 /// What the user changed this frame.
@@ -159,4 +160,23 @@ pub fn explore_panel(
         ch.render = true;
     }
     ch
+}
+
+/// Orbit inspector readout. Returns true if "Clear orbit" was clicked.
+pub fn orbit_panel(ui: &mut egui::Ui, orbit: &OrbitState) -> bool {
+    ui.heading("Orbit");
+    ui.monospace(format!(
+        "start {:+.6} {:+.6}i",
+        orbit.point.re, orbit.point.im
+    ));
+    let steps = orbit.path.len().saturating_sub(1);
+    ui.label(match orbit.outcome {
+        Sample::Escaped { iter, .. } => format!("escaped after {iter} steps"),
+        Sample::Inside => format!("stayed bounded for {steps} steps"),
+        Sample::Converged { root, iter } => format!("converged to root {root} after {iter} steps"),
+    });
+    for (i, z) in orbit.path.iter().take(10).enumerate() {
+        ui.monospace(format!("z{i:<2} {:+.5} {:+.5}i", z.re, z.im));
+    }
+    ui.button("Clear orbit").clicked()
 }

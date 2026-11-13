@@ -1,12 +1,13 @@
 //! Top-level application state and layout.
 
 use crate::engine::color::{ColorSettings, colorize};
-use crate::engine::escape::{FractalKind, Sample};
+use crate::engine::escape::{FractalKind, Sample, iterate, orbit};
 use crate::engine::jobs::{RenderRequest, RenderSlot};
 use crate::engine::render::F64Sampler;
 use crate::engine::viewport::{MaxIter, Viewport};
-use crate::ui::panel::explore_panel;
-use crate::ui::view::show_view;
+use crate::ui::julia::{JuliaAction, JuliaPanel};
+use crate::ui::panel::{explore_panel, orbit_panel};
+use crate::ui::view::{draw_orbit, show_view};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use num_complex::Complex64;
 use std::sync::Arc;
@@ -47,6 +48,27 @@ impl Default for ExploreState {
     }
 }
 
+/// The orbit inspector's current point.
+pub struct OrbitState {
+    pub point: Complex64,
+    pub path: Vec<Complex64>,
+    pub outcome: Sample,
+}
+
+/// Orbits drawn on screen are capped at this many steps.
+const ORBIT_MAX_STEPS: u32 = 1000;
+
+impl OrbitState {
+    pub fn compute(kind: &FractalKind, point: Complex64, max_iter: u32) -> Self {
+        let n = max_iter.min(ORBIT_MAX_STEPS);
+        Self {
+            point,
+            path: orbit(kind, point, n),
+            outcome: iterate(kind, point, n),
+        }
+    }
+}
+
 /// Upload colored pixels into `texture` (creating it if needed).
 pub fn upload(
     ctx: &egui::Context,
@@ -78,6 +100,8 @@ pub struct FractalApp {
     pixels: Vec<[u8; 4]>,
     needs_render: bool,
     cursor: Option<Complex64>,
+    julia: JuliaPanel,
+    orbit: Option<OrbitState>,
 }
 
 impl FractalApp {
@@ -92,6 +116,8 @@ impl FractalApp {
             pixels: Vec::new(),
             needs_render: true,
             cursor: None,
+            julia: JuliaPanel::new(&cc.egui_ctx, max_threads),
+            orbit: None,
         }
     }
 
@@ -135,6 +161,17 @@ impl FractalApp {
         }
     }
 
+    /// Recompute the orbit after the fractal or its parameters change.
+    fn refresh_orbit(&mut self) {
+        if let Some(o) = &self.orbit {
+            let max_iter = self
+                .explore
+                .max_iter
+                .resolve(self.explore.view.magnification());
+            self.orbit = Some(OrbitState::compute(&self.explore.kind, o.point, max_iter));
+        }
+    }
+
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             match self.cursor {
@@ -167,14 +204,47 @@ impl eframe::App for FractalApp {
                 );
                 if let Some(n) = ch.threads {
                     self.main_slot.set_threads(n);
+                    self.julia.set_main_threads(n);
                     self.needs_render = true;
                 }
-                self.needs_render |= ch.render;
+                if ch.render {
+                    self.needs_render = true;
+                    self.refresh_orbit();
+                }
                 if ch.color {
                     self.recolor(&ctx);
+                    self.julia.invalidate();
+                }
+                if self.explore.kind == FractalKind::Mandelbrot {
+                    ui.checkbox(&mut self.julia.visible, "Show Julia panel");
+                }
+                if let Some(o) = &self.orbit {
+                    ui.separator();
+                    if orbit_panel(ui, o) {
+                        self.orbit = None;
+                    }
                 }
             });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+
+        let julia_on = self.julia.visible && self.explore.kind == FractalKind::Mandelbrot;
+        if julia_on {
+            let color = self.explore.color;
+            let action = egui::Panel::right("julia")
+                .exact_size(340.0)
+                .show(ui, |ui| self.julia.show(ui, &color))
+                .inner;
+            if let JuliaAction::OpenInMain(c) = action {
+                self.explore.kind = FractalKind::Julia { c };
+                self.explore.view = self
+                    .explore
+                    .kind
+                    .default_view(self.explore.view.width, self.explore.view.height);
+                self.orbit = None;
+                self.julia.cancel();
+                self.needs_render = true;
+            }
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -193,10 +263,40 @@ impl eframe::App for FractalApp {
                 }
                 self.needs_render |= resp.view_changed;
                 self.cursor = resp.hovered;
+                if julia_on {
+                    self.julia.hover(resp.hovered);
+                }
+                if let Some(p) = resp.clicked {
+                    let max_iter = self
+                        .explore
+                        .max_iter
+                        .resolve(self.explore.view.magnification());
+                    self.orbit = Some(OrbitState::compute(&self.explore.kind, p, max_iter));
+                    if julia_on {
+                        self.julia.pinned = Some(p);
+                    }
+                }
+                if let Some(o) = &self.orbit {
+                    draw_orbit(ui, &resp.mapping, &self.explore.view, &o.path);
+                }
             });
 
         if self.needs_render {
             self.submit();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orbit_of_minus_one_is_a_two_cycle() {
+        let o = OrbitState::compute(&FractalKind::Mandelbrot, Complex64::new(-1.0, 0.0), 50_000);
+        assert_eq!(o.outcome, Sample::Inside);
+        assert_eq!(o.path.len(), ORBIT_MAX_STEPS as usize + 1);
+        assert_eq!(o.path[1], Complex64::new(-1.0, 0.0));
+        assert_eq!(o.path[2], Complex64::new(0.0, 0.0));
     }
 }

@@ -123,3 +123,33 @@ pub fn show_view(
         mapping,
     }
 }
+
+/// Draw an orbit z₀, z₁, … as a polyline with dots, on top of the view.
+pub fn draw_orbit(ui: &egui::Ui, mapping: &ScreenMapping, view: &Viewport, path: &[Complex64]) {
+    let painter = ui.painter_at(mapping.rect);
+    // Points far outside the view (escaping orbits) are skipped so huge
+    // coordinates never reach the tessellator.
+    let limit = mapping
+        .rect
+        .expand(mapping.rect.width().max(mapping.rect.height()) * 4.0);
+    let pts: Vec<Option<Pos2>> = path
+        .iter()
+        .map(|z| Some(mapping.to_screen(view, *z)).filter(|p| limit.contains(*p)))
+        .collect();
+    let line = egui::Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 255, 255, 200));
+    for w in pts.windows(2) {
+        if let [Some(a), Some(b)] = w {
+            painter.line_segment([*a, *b], line);
+        }
+    }
+    for (i, p) in pts.iter().enumerate() {
+        if let Some(p) = p {
+            let color = if i == 0 {
+                Color32::from_rgb(255, 80, 80)
+            } else {
+                Color32::from_rgb(255, 230, 120)
+            };
+            painter.circle_filled(*p, if i == 0 { 4.0 } else { 2.5 }, color);
+        }
+    }
+}
