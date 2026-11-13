@@ -12,6 +12,7 @@ use crate::engine::jobs::{RenderRequest, RenderSlot};
 use crate::engine::render::F64Sampler;
 use crate::engine::viewport::Viewport;
 use crate::ui::app::{repainting_slot, upload};
+use crate::ui::notes::{NOTE_JULIA_LINK, note};
 use eframe::egui::{self, TextureHandle};
 use num_complex::Complex64;
 use std::sync::Arc;
@@ -130,6 +131,7 @@ impl JuliaPanel {
         self.update_render(&ui.ctx().clone(), side, color);
 
         ui.heading("Julia set");
+        note(ui, "julia_note", NOTE_JULIA_LINK);
         match self.current_c() {
             Some(c) => {
                 ui.monospace(format!("c = {:+.6} {:+.6}i", c.re, c.im));

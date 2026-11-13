@@ -6,6 +6,7 @@ use crate::engine::escape::Sample;
 use crate::engine::newton::NewtonPoly;
 use crate::engine::viewport::MaxIter;
 use crate::ui::app::{ExploreState, OrbitState};
+use crate::ui::notes::{NOTE_ORBIT, note, note_for_kind};
 use eframe::egui;
 
 /// What the user changed this frame.
@@ -80,6 +81,8 @@ pub fn explore_panel(
         }
         _ => {}
     }
+
+    note(ui, "kind_note", note_for_kind(&state.kind));
 
     ui.separator();
     ui.heading("Iterations");
@@ -156,6 +159,7 @@ pub fn explore_panel(
 /// Orbit inspector readout. Returns true if "Clear orbit" was clicked.
 pub fn orbit_panel(ui: &mut egui::Ui, orbit: &OrbitState) -> bool {
     ui.heading("Orbit");
+    note(ui, "orbit_note", NOTE_ORBIT);
     ui.monospace(format!(
         "start {:+.6} {:+.6}i",
         orbit.point.re, orbit.point.im

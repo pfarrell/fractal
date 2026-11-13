@@ -6,6 +6,7 @@ use crate::engine::ifs::{AffineMap, Density, IfsSystem, chaos_game};
 use crate::engine::jobs::JobSlot;
 use crate::engine::viewport::Viewport;
 use crate::ui::app::upload;
+use crate::ui::notes::{NOTE_IFS, note};
 use crate::ui::view::{ScreenMapping, show_view};
 use eframe::egui::{self, Color32, Stroke, TextureHandle};
 use num_complex::Complex64;
@@ -145,6 +146,7 @@ impl IfsState {
     /// Left-panel controls (below the shared color/thread controls).
     pub fn controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Iterated function system");
+        note(ui, "ifs_note", NOTE_IFS);
         egui::ComboBox::from_id_salt("preset")
             .selected_text(&self.system.name)
             .show_ui(ui, |ui| {
