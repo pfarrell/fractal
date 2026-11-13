@@ -11,6 +11,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Fractal Explorer",
         options,
-        Box::new(|_cc| Ok(Box::new(FractalApp::default()))),
+        Box::new(|cc| Ok(Box::new(FractalApp::new(cc)))),
     )
 }

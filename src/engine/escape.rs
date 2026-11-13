@@ -6,6 +6,7 @@
 //! sets `c` is fixed and the pixel is the starting point z₀.
 
 use crate::engine::newton::{NewtonPoly, newton_iterate, newton_orbit};
+use crate::engine::viewport::Viewport;
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +53,35 @@ impl FractalKind {
             FractalKind::Multibrot { .. } => "Multibrot",
             FractalKind::Newton { .. } => "Newton",
         }
+    }
+
+    /// One of each kind, with default parameters, for the type picker.
+    pub fn gallery() -> Vec<FractalKind> {
+        vec![
+            FractalKind::Mandelbrot,
+            FractalKind::Julia {
+                c: Complex64::new(-0.8, 0.156),
+            },
+            FractalKind::BurningShip,
+            FractalKind::Tricorn,
+            FractalKind::Multibrot { power: 3 },
+            FractalKind::Newton {
+                poly: NewtonPoly::CubeRootsOfUnity,
+            },
+        ]
+    }
+
+    /// A view that frames the whole fractal.
+    pub fn default_view(&self, width: usize, height: usize) -> Viewport {
+        let (re, im, span) = match self {
+            FractalKind::Mandelbrot => return Viewport::default_for(width, height),
+            FractalKind::Julia { .. } => (0.0, 0.0, 3.2),
+            FractalKind::BurningShip => (-0.4, -0.5, 3.0),
+            FractalKind::Tricorn => (-0.2, 0.0, 3.4),
+            FractalKind::Multibrot { .. } => (0.0, 0.0, 3.0),
+            FractalKind::Newton { .. } => (0.0, 0.0, 3.0),
+        };
+        Viewport::new(Complex64::new(re, im), span, width, height)
     }
 
     /// The exponent of the formula (used by smooth coloring).
@@ -141,6 +171,7 @@ pub fn orbit(kind: &FractalKind, point: Complex64, max_iter: u32) -> Vec<Complex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::viewport::Viewport;
     use num_complex::Complex64;
 
     fn c(re: f64, im: f64) -> Complex64 {
@@ -234,6 +265,20 @@ mod tests {
         let o = orbit(&FractalKind::Mandelbrot, c(2.0, 0.0), 1000);
         assert_eq!(o.len(), 5);
         assert!(o[4].norm() > BAILOUT);
+    }
+
+    #[test]
+    fn default_views() {
+        assert_eq!(
+            FractalKind::Mandelbrot.default_view(640, 480),
+            Viewport::default_for(640, 480)
+        );
+        let all = FractalKind::gallery();
+        assert_eq!(all.len(), 6);
+        for k in all {
+            let v = k.default_view(640, 480);
+            assert!(v.span > 0.0 && v.width == 640 && v.height == 480, "{k:?}");
+        }
     }
 
     #[test]

@@ -1,0 +1,162 @@
+//! The left-hand control panel for escape-time fractals.
+
+use crate::engine::color::PaletteId;
+use crate::engine::escape::FractalKind;
+use crate::engine::newton::NewtonPoly;
+use crate::engine::viewport::MaxIter;
+use crate::ui::app::ExploreState;
+use eframe::egui;
+
+/// What the user changed this frame.
+#[derive(Default)]
+pub struct PanelChanges {
+    /// Needs a re-render (kind, parameters, iterations, view reset).
+    pub render: bool,
+    /// Needs only a recolor of the existing samples.
+    pub color: bool,
+    /// New thread count requested.
+    pub threads: Option<usize>,
+}
+
+/// Controls for the escape-time explorer. `threads` is the current main
+/// pool size; `max_threads` the number of cores.
+pub fn explore_panel(
+    ui: &mut egui::Ui,
+    state: &mut ExploreState,
+    threads: usize,
+    max_threads: usize,
+) -> PanelChanges {
+    let mut ch = PanelChanges::default();
+
+    ui.heading("Fractal");
+    let current = state.kind;
+    egui::ComboBox::from_id_salt("kind")
+        .selected_text(current.label())
+        .show_ui(ui, |ui| {
+            for k in FractalKind::gallery() {
+                if ui
+                    .selectable_label(k.label() == current.label(), k.label())
+                    .clicked()
+                    && k.label() != current.label()
+                {
+                    state.kind = k;
+                    state.view = k.default_view(state.view.width, state.view.height);
+                    ch.render = true;
+                }
+            }
+        });
+
+    match &mut state.kind {
+        FractalKind::Julia { c } => {
+            ui.horizontal(|ui| {
+                ui.label("c =");
+                let speed = 0.001;
+                ch.render |= ui
+                    .add(egui::DragValue::new(&mut c.re).speed(speed).max_decimals(6))
+                    .changed();
+                ui.label("+");
+                ch.render |= ui
+                    .add(egui::DragValue::new(&mut c.im).speed(speed).max_decimals(6))
+                    .changed();
+                ui.label("i");
+            });
+        }
+        FractalKind::Multibrot { power } => {
+            ch.render |= ui
+                .add(egui::Slider::new(power, 2..=8).text("power d"))
+                .changed();
+        }
+        FractalKind::Newton { poly } => {
+            egui::ComboBox::from_id_salt("poly")
+                .selected_text(poly.label())
+                .show_ui(ui, |ui| {
+                    for p in NewtonPoly::ALL {
+                        ch.render |= ui.selectable_value(poly, p, p.label()).changed();
+                    }
+                });
+        }
+        _ => {}
+    }
+
+    ui.separator();
+    ui.heading("Iterations");
+    let mut auto = state.max_iter == MaxIter::Auto;
+    let effective = state.max_iter.resolve(state.view.magnification());
+    if ui
+        .checkbox(&mut auto, "Auto (deeper zoom → more)")
+        .changed()
+    {
+        state.max_iter = if auto {
+            MaxIter::Auto
+        } else {
+            MaxIter::Fixed(effective)
+        };
+        ch.render = true;
+    }
+    match &mut state.max_iter {
+        MaxIter::Fixed(n) => {
+            ch.render |= ui
+                .add(
+                    egui::Slider::new(n, 50..=20_000)
+                        .logarithmic(true)
+                        .text("max"),
+                )
+                .changed();
+        }
+        MaxIter::Auto => {
+            ui.label(format!("max = {effective}"));
+        }
+    }
+
+    ui.separator();
+    ui.heading("Color");
+    egui::ComboBox::from_id_salt("palette")
+        .selected_text(state.color.palette.label())
+        .show_ui(ui, |ui| {
+            for p in PaletteId::ALL {
+                ch.color |= ui
+                    .selectable_value(&mut state.color.palette, p, p.label())
+                    .changed();
+            }
+        });
+    ch.color |= ui
+        .add(egui::Slider::new(&mut state.color.offset, 0.0..=1.0).text("offset"))
+        .changed();
+    ch.color |= ui
+        .add(
+            egui::Slider::new(&mut state.color.scale, 1.0 / 256.0..=0.25)
+                .logarithmic(true)
+                .text("scale"),
+        )
+        .changed();
+
+    ui.separator();
+    ui.heading("Performance");
+    let mut n = threads;
+    if ui
+        .add(egui::Slider::new(&mut n, 1..=max_threads).text("threads"))
+        .changed()
+    {
+        ch.threads = Some(n);
+    }
+    match state.last_render {
+        Some((elapsed, threads, pixels)) => {
+            let secs = elapsed.as_secs_f64().max(1e-9);
+            ui.label(format!(
+                "{:.0} ms · {threads} threads · {:.1} Mpx/s",
+                secs * 1000.0,
+                pixels as f64 / secs / 1e6
+            ));
+        }
+        None => {
+            ui.label("rendering…");
+        }
+    }
+
+    ui.separator();
+    if ui.button("Reset view").clicked() {
+        state.view = state.kind.default_view(state.view.width, state.view.height);
+        ch.render = true;
+    }
+    ch
+}
