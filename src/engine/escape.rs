@@ -5,6 +5,7 @@
 //! Multibrot) the pixel is `c` and every orbit starts at z₀ = 0. For Julia
 //! sets `c` is fixed and the pixel is the starting point z₀.
 
+use crate::engine::newton::{NewtonPoly, newton_iterate, newton_orbit};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,8 @@ pub enum FractalKind {
     Tricorn,
     /// z → z^power + c, power in 2..=8
     Multibrot { power: u32 },
+    /// Newton's method on a polynomial; the pixel is z₀.
+    Newton { poly: NewtonPoly },
 }
 
 /// The outcome of iterating one point.
@@ -47,6 +50,7 @@ impl FractalKind {
             FractalKind::BurningShip => "Burning Ship",
             FractalKind::Tricorn => "Tricorn",
             FractalKind::Multibrot { .. } => "Multibrot",
+            FractalKind::Newton { .. } => "Newton",
         }
     }
 
@@ -62,6 +66,7 @@ impl FractalKind {
     fn start(&self, point: Complex64) -> (Complex64, Complex64) {
         match self {
             FractalKind::Julia { c } => (point, *c),
+            FractalKind::Newton { .. } => (point, Complex64::new(0.0, 0.0)),
             _ => (Complex64::new(0.0, 0.0), point),
         }
     }
@@ -80,6 +85,8 @@ impl FractalKind {
                 w * w + c
             }
             FractalKind::Multibrot { power } => z.powu(*power) + c,
+            // Newton has its own loop (see `newton.rs`); never reached.
+            FractalKind::Newton { .. } => z,
         }
     }
 }
@@ -97,6 +104,9 @@ pub fn smooth_value(iter: u32, z_abs: f64, power: u32) -> f32 {
 
 /// Iterate one point and classify it.
 pub fn iterate(kind: &FractalKind, point: Complex64, max_iter: u32) -> Sample {
+    if let FractalKind::Newton { poly } = kind {
+        return newton_iterate(*poly, point, max_iter);
+    }
     let (mut z, c) = kind.start(point);
     for n in 1..=max_iter {
         z = kind.step(z, c);
@@ -113,6 +123,9 @@ pub fn iterate(kind: &FractalKind, point: Complex64, max_iter: u32) -> Sample {
 /// The sequence z₀, z₁, … for one point, ending at the first escaping
 /// value or after `max_iter` steps.
 pub fn orbit(kind: &FractalKind, point: Complex64, max_iter: u32) -> Vec<Complex64> {
+    if let FractalKind::Newton { poly } = kind {
+        return newton_orbit(*poly, point, max_iter);
+    }
     let (mut z, c) = kind.start(point);
     let mut path = vec![z];
     for _ in 0..max_iter {
