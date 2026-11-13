@@ -199,7 +199,7 @@ impl MovieDialog {
         let Some(start) = self.start else { return };
         let running = self.job.is_some();
 
-        let modal = egui::Modal::new(egui::Id::new("movie_dialog")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("movie_dialog")).show(ctx, |ui| {
             ui.set_width(420.0);
             ui.heading("Export zoom movie");
             ui.label(format!(
