@@ -24,7 +24,7 @@ Download the file for your machine from the
 | Linux, ARM64 | `fractal-linux-arm64` |
 
 ```sh
-curl -fLo ~/.local/bin/fractal \
+curl -fL --create-dirs -o ~/.local/bin/fractal \
   https://github.com/pfarrell/fractal/releases/latest/download/fractal-darwin-arm64
 chmod +x ~/.local/bin/fractal
 ```
@@ -49,7 +49,8 @@ fractal version
 
 `fractal update` asks GitHub for the latest release, downloads the file for
 your platform, checks it against the release's `checksums.txt`, and swaps it
-in atomically; if anything fails the old binary stays. It can run while the
+in atomically, but only after the new binary runs here and reports the
+expected version; if anything fails the old binary stays. It can run while the
 explorer is open (restart the app to use the new version). A build from
 source reports `dev` and does not update itself.
 
@@ -62,7 +63,8 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 That runs `.github/workflows/release.yml`, which checks the code, builds the
-four binaries above on macOS and Ubuntu runners, and publishes them with a
+four binaries above on macOS and Ubuntu 22.04 runners (so the Linux ones
+need only glibc 2.35), and publishes them with a
 `checksums.txt`. Tags must look like `vMAJOR.MINOR.PATCH`. GitHub marks the
 newest release as Latest, which is what `fractal update` installs, so when
 tagging a hotfix on an older line after a newer release exists, publish it

@@ -1,4 +1,6 @@
 //! `fractal update` end to end against a fake release server on localhost.
+//! Unix-only: the fake release binaries are shell scripts.
+#![cfg(unix)]
 
 use fractal_explorer::update::{Outcome, Source, UpdateError, run, sha256_hex};
 use std::collections::HashMap;
@@ -90,8 +92,14 @@ fn release(tag: &str, asset: &[u8], hash: &str) -> HashMap<String, (u16, Vec<u8>
     r
 }
 
+/// A stand-in binary that answers `version` like a real build of `tag`.
+fn fake_binary(tag: &str) -> Vec<u8> {
+    format!("#!/bin/sh\necho \"fractal {tag}\"\n").into_bytes()
+}
+
 fn good_release(tag: &str) -> HashMap<String, (u16, Vec<u8>)> {
-    release(tag, b"new", &sha256_hex(b"new"))
+    let bin = fake_binary(tag);
+    release(tag, &bin, &sha256_hex(&bin))
 }
 
 fn old_exe() -> (tempfile::TempDir, PathBuf) {
@@ -117,7 +125,30 @@ fn updates_when_newer() {
             to: "v0.2.0".into()
         }
     );
-    assert_eq!(contents(&exe), "new");
+    assert_eq!(contents(&exe).as_bytes(), fake_binary("v0.2.0"));
+}
+
+#[test]
+fn download_that_will_not_run_keeps_old() {
+    // Intact (checksum matches) but not runnable here: wrong arch, too-new glibc...
+    let server = FakeServer::start(release("v0.2.0", b"garbage", &sha256_hex(b"garbage")));
+    let (_d, exe) = old_exe();
+    let r = run(&server.source(), "v0.1.0", &exe, "linux", "x86_64", false);
+    assert!(matches!(r, Err(UpdateError::WontRun { .. })), "{r:?}");
+    assert_eq!(contents(&exe), "old");
+}
+
+#[test]
+fn download_reporting_wrong_version_keeps_old() {
+    let bin = fake_binary("v0.1.9");
+    let server = FakeServer::start(release("v0.2.0", &bin, &sha256_hex(&bin)));
+    let (_d, exe) = old_exe();
+    let r = run(&server.source(), "v0.1.0", &exe, "linux", "x86_64", false);
+    match &r {
+        Err(e @ UpdateError::WontRun { .. }) => assert!(e.to_string().contains("v0.1.9"), "{e}"),
+        other => panic!("expected WontRun, got {other:?}"),
+    }
+    assert_eq!(contents(&exe), "old");
 }
 
 #[test]
@@ -180,7 +211,11 @@ fn dev_build_refuses_without_network() {
 
 #[test]
 fn checksum_mismatch_keeps_old() {
-    let server = FakeServer::start(release("v0.2.0", b"new", &sha256_hex(b"other")));
+    let server = FakeServer::start(release(
+        "v0.2.0",
+        &fake_binary("v0.2.0"),
+        &sha256_hex(b"other"),
+    ));
     let (_d, exe) = old_exe();
     let r = run(&server.source(), "v0.1.0", &exe, "linux", "x86_64", false);
     assert!(matches!(r, Err(UpdateError::ChecksumMismatch(_))), "{r:?}");

@@ -5,6 +5,7 @@
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 /// Where people can download a release by hand.
 pub const RELEASES_PAGE: &str = "https://github.com/pfarrell/fractal/releases";
@@ -26,6 +27,11 @@ pub enum UpdateError {
     ChecksumMissing(String),
     ChecksumMismatch(String),
     Replace(String),
+    /// The download is intact but doesn't run here, or reports another version.
+    WontRun {
+        asset: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for UpdateError {
@@ -66,6 +72,11 @@ impl std::fmt::Display for UpdateError {
                 "{asset} does not match its checksum (corrupt download?); not installing it"
             ),
             UpdateError::Replace(msg) => write!(f, "{msg}"),
+            UpdateError::WontRun { asset, detail } => write!(
+                f,
+                "downloaded {asset} does not run on this machine ({detail}); \
+                 kept the current binary"
+            ),
         }
     }
 }
@@ -135,6 +146,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// renamed over the target, so any failure leaves the old binary intact.
 /// A running process keeps its old inode, so replacing itself is safe.
 pub fn replace_exe(exe: &Path, contents: &[u8]) -> Result<(), UpdateError> {
+    replace_exe_checked(exe, contents, |_| Ok(()))
+}
+
+/// [`replace_exe`], but `check` gets the staged, closed, executable new
+/// file first, and an error from it cancels the swap.
+pub fn replace_exe_checked(
+    exe: &Path,
+    contents: &[u8],
+    check: impl FnOnce(&Path) -> Result<(), UpdateError>,
+) -> Result<(), UpdateError> {
     let fail = |what: String| move |e: std::io::Error| UpdateError::Replace(format!("{what}: {e}"));
     let target = std::fs::canonicalize(exe).map_err(fail(format!("resolve {}", exe.display())))?;
     let dir = target
@@ -157,7 +178,12 @@ pub fn replace_exe(exe: &Path, contents: &[u8]) -> Result<(), UpdateError> {
             .set_permissions(std::fs::Permissions::from_mode(0o755))
             .map_err(fail("set permissions".into()))?;
     }
-    tmp.persist(&target)
+    // Close the write handle so the file can be executed (no ETXTBSY);
+    // the path still deletes itself if we bail out.
+    let staged = tmp.into_temp_path();
+    check(&staged)?;
+    staged
+        .persist(&target)
         .map_err(|e| UpdateError::Replace(format!("replace {}: {}", target.display(), e.error)))?;
     Ok(())
 }
@@ -189,7 +215,11 @@ const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(60)))
+        // The global budget includes the ~30 MB body, so keep it generous
+        // and let connect/response timeouts catch a dead server quickly.
+        .timeout_global(Some(Duration::from_secs(20 * 60)))
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
         .http_status_as_error(false)
         .user_agent("fractal-updater")
         .build()
@@ -262,6 +292,33 @@ fn fetch_with(
     get(agent, &url, "application/octet-stream")
 }
 
+/// Run the staged binary with `version` and require `fractal <tag>`. A
+/// checksum proves the download is intact, not that it runs here (wrong
+/// architecture, a newer glibc than this machine has, a broken build).
+fn runs_as(staged: &Path, asset: &str, tag: &str) -> Result<(), UpdateError> {
+    let wont_run = |detail: String| UpdateError::WontRun {
+        asset: asset.into(),
+        detail,
+    };
+    let out = std::process::Command::new(staged)
+        .arg("version")
+        .output()
+        .map_err(|e| wont_run(e.to_string()))?;
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let want = format!("fractal {tag}");
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: String = stderr.trim().chars().take(300).collect();
+        return Err(wont_run(format!("{}: {tail}", out.status)));
+    }
+    if printed != want {
+        return Err(wont_run(format!(
+            "it reports {printed:?}, expected {want:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// The whole `fractal update`: compare `current` with the latest release
 /// and, unless `check_only`, install it over `exe`. Every failure before
 /// the final rename leaves `exe` untouched.
@@ -292,7 +349,7 @@ pub fn run(
     if sha256_hex(&binary) != expected {
         return Err(UpdateError::ChecksumMismatch(asset));
     }
-    replace_exe(exe, &binary)?;
+    replace_exe_checked(exe, &binary, |staged| runs_as(staged, &asset, &latest))?;
     Ok(Outcome::Updated {
         from: current.into(),
         to: latest,
@@ -379,6 +436,16 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn slow_links_can_finish_a_30mb_download() {
+        let t = agent().config().timeouts();
+        // The overall budget covers the body: 60 s would fail below ~4 Mbit/s.
+        assert!(t.global >= Some(Duration::from_secs(600)), "{:?}", t.global);
+        // A dead server still fails fast.
+        assert_eq!(t.connect, Some(Duration::from_secs(15)));
+        assert_eq!(t.recv_response, Some(Duration::from_secs(30)));
     }
 
     #[test]
