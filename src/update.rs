@@ -162,6 +162,143 @@ pub fn replace_exe(exe: &Path, contents: &[u8]) -> Result<(), UpdateError> {
     Ok(())
 }
 
+/// Where releases are looked up and downloaded from.
+pub struct Source {
+    pub api_base: String,
+    pub download_base: String,
+}
+
+impl Source {
+    pub fn github() -> Self {
+        Self {
+            api_base: "https://api.github.com/repos/pfarrell/fractal".into(),
+            download_base: "https://github.com/pfarrell/fractal/releases/download".into(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    UpToDate { latest: String },
+    Available { latest: String },
+    Updated { from: String, to: String },
+}
+
+/// Largest download accepted (the binary is ~30 MB).
+const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(60)))
+        .http_status_as_error(false)
+        .user_agent("fractal-updater")
+        .build()
+        .into()
+}
+
+/// GET `url`, returning the body of a 2xx response.
+fn get(agent: &ureq::Agent, url: &str, accept: &str) -> Result<Vec<u8>, UpdateError> {
+    let http_err = |status: Option<u16>, detail: String| UpdateError::Http {
+        url: url.into(),
+        status,
+        detail,
+    };
+    let mut resp = agent
+        .get(url)
+        .header("Accept", accept)
+        .call()
+        .map_err(|e| http_err(None, e.to_string()))?;
+    let status = resp.status();
+    let body = resp
+        .body_mut()
+        .with_config()
+        .limit(MAX_DOWNLOAD)
+        .read_to_vec()
+        .map_err(|e| http_err(Some(status.as_u16()), e.to_string()))?;
+    if !status.is_success() {
+        return Err(http_err(Some(status.as_u16()), error_detail(&body)));
+    }
+    Ok(body)
+}
+
+/// GitHub's `{"message": ...}`, else the start of the body.
+fn error_detail(body: &[u8]) -> String {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("message")?.as_str().map(str::to_owned));
+    message.unwrap_or_else(|| String::from_utf8_lossy(body).chars().take(200).collect())
+}
+
+/// Tag of the newest published release (GitHub skips drafts and prereleases).
+pub fn latest_tag(src: &Source) -> Result<String, UpdateError> {
+    latest_tag_with(&agent(), src)
+}
+
+fn latest_tag_with(agent: &ureq::Agent, src: &Source) -> Result<String, UpdateError> {
+    let url = format!("{}/releases/latest", src.api_base);
+    let body = get(agent, &url, "application/vnd.github+json")?;
+    let tag = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("tag_name")?.as_str().map(str::to_owned))
+        .ok_or_else(|| UpdateError::BadTag(error_detail(&body)))?;
+    if parse_tag(&tag).is_none() {
+        return Err(UpdateError::BadTag(tag));
+    }
+    Ok(tag)
+}
+
+/// Download one file of release `tag` (redirects are followed).
+pub fn fetch(src: &Source, tag: &str, file: &str) -> Result<Vec<u8>, UpdateError> {
+    fetch_with(&agent(), src, tag, file)
+}
+
+fn fetch_with(
+    agent: &ureq::Agent,
+    src: &Source,
+    tag: &str,
+    file: &str,
+) -> Result<Vec<u8>, UpdateError> {
+    let url = format!("{}/{tag}/{file}", src.download_base);
+    get(agent, &url, "application/octet-stream")
+}
+
+/// The whole `fractal update`: compare `current` with the latest release
+/// and, unless `check_only`, install it over `exe`. Every failure before
+/// the final rename leaves `exe` untouched.
+pub fn run(
+    src: &Source,
+    current: &str,
+    exe: &Path,
+    os: &str,
+    arch: &str,
+    check_only: bool,
+) -> Result<Outcome, UpdateError> {
+    if current == "dev" {
+        return Err(UpdateError::DevBuild);
+    }
+    let agent = agent();
+    let latest = latest_tag_with(&agent, src)?;
+    if !is_newer(current, &latest) {
+        return Ok(Outcome::UpToDate { latest });
+    }
+    if check_only {
+        return Ok(Outcome::Available { latest });
+    }
+    let asset = asset_name(os, arch)?;
+    let binary = fetch_with(&agent, src, &latest, &asset)?;
+    let sums = fetch_with(&agent, src, &latest, "checksums.txt")?;
+    let expected = expected_sha256(&String::from_utf8_lossy(&sums), &asset)
+        .ok_or_else(|| UpdateError::ChecksumMissing(asset.clone()))?;
+    if sha256_hex(&binary) != expected {
+        return Err(UpdateError::ChecksumMismatch(asset));
+    }
+    replace_exe(exe, &binary)?;
+    Ok(Outcome::Updated {
+        from: current.into(),
+        to: latest,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

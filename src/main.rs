@@ -1,6 +1,7 @@
 use eframe::egui;
 use fractal_explorer::cli::{self, Command, USAGE, VERSION};
 use fractal_explorer::ui::app::FractalApp;
+use fractal_explorer::update::{self, Outcome, Source};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -21,15 +22,41 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Ok(Command::Update { .. }) => {
-            eprintln!("fractal update: not yet implemented");
-            ExitCode::FAILURE
-        }
+        Ok(Command::Update { check }) => update(check),
         Err(msg) => {
             eprintln!("{msg}\n\n{USAGE}");
             ExitCode::from(2)
         }
     }
+}
+
+fn update(check: bool) -> ExitCode {
+    let result = std::env::current_exe()
+        .map_err(|e| update::UpdateError::Replace(format!("find running binary: {e}")))
+        .and_then(|exe| {
+            update::run(
+                &Source::github(),
+                VERSION,
+                &exe,
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                check,
+            )
+        });
+    match result {
+        Ok(Outcome::UpToDate { latest }) => {
+            println!("fractal {VERSION} is up to date (latest release {latest})");
+        }
+        Ok(Outcome::Available { latest }) => {
+            println!("update available: {latest} (you have {VERSION}); run 'fractal update'");
+        }
+        Ok(Outcome::Updated { from, to }) => println!("updated {from} -> {to}"),
+        Err(e) => {
+            eprintln!("fractal update: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_gui() -> eframe::Result {
