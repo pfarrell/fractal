@@ -1,7 +1,8 @@
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::movie::{
-    MovieError, MovieProgress, MovieSpec, ffmpeg_args, render_movie,
+    MovieError, MovieProgress, MovieSpec, ffmpeg_args, ffmpeg_install_hint, find_program,
+    render_movie,
 };
 use fractal_explorer::engine::render::CancelToken;
 use fractal_explorer::engine::viewport::MaxIter;
@@ -235,8 +236,12 @@ fn have_ffmpeg() -> bool {
 
 #[test]
 fn unwritable_output_errors() {
+    // The output name is taken by a folder, so ffmpeg can't write it.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("taken.mp4");
+    std::fs::create_dir(&out).unwrap();
     let r = render_movie(
-        &short(PathBuf::from("/proc/forbidden.mp4"), 2),
+        &short(out, 2),
         2,
         Path::new("ffmpeg"),
         &CancelToken::never(),
@@ -345,4 +350,56 @@ fn slider_max_end_zoom_is_accepted() {
         sp.end_span = DEFAULT_SPAN / floor_mag;
         assert!(sp.validate().is_ok(), "target {}", sp.target);
     }
+}
+
+#[cfg(unix)]
+fn fake_program(dir: &Path, name: &str, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(name);
+    std::fs::write(&p, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    p
+}
+
+#[cfg(unix)]
+#[test]
+fn find_program_prefers_path_then_fallbacks() {
+    let (a, b, fb) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let in_b = fake_program(b.path(), "ffmpeg", 0o755);
+    let in_fb = fake_program(fb.path(), "ffmpeg", 0o755);
+    let path = std::env::join_paths([a.path(), b.path()]).unwrap();
+    assert_eq!(
+        find_program("ffmpeg", Some(&path), [fb.path()]),
+        Some(in_b),
+        "first PATH hit wins"
+    );
+    let only_a = std::env::join_paths([a.path()]).unwrap();
+    assert_eq!(
+        find_program("ffmpeg", Some(&only_a), [fb.path()]),
+        Some(in_fb.clone()),
+        "falls back when PATH lacks it"
+    );
+    assert_eq!(find_program("ffmpeg", None, [fb.path()]), Some(in_fb));
+    assert_eq!(find_program("ffmpeg", Some(&only_a), [a.path()]), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn find_program_skips_non_executables_and_folders() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    fake_program(a.path(), "ffmpeg", 0o644);
+    std::fs::create_dir(b.path().join("ffmpeg")).unwrap();
+    assert_eq!(find_program("ffmpeg", None, [a.path(), b.path()]), None);
+}
+
+#[test]
+fn missing_ffmpeg_message_says_how_to_fix_it() {
+    let msg = MovieError::FfmpegMissing.to_string();
+    assert!(msg.contains("ffmpeg not found"), "{msg}");
+    assert!(msg.contains(ffmpeg_install_hint()), "{msg}");
+    assert!(ffmpeg_install_hint().contains("install ffmpeg"));
 }

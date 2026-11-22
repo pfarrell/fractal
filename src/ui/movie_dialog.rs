@@ -3,12 +3,12 @@
 use crate::engine::bookmark::{Bookmark, BookmarkView};
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
-use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, render_movie};
+use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie};
 use crate::engine::render::CancelToken;
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use eframe::egui;
 use num_complex::Complex64;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -44,6 +44,9 @@ pub struct MovieStart {
     pub max_iter: MaxIter,
     pub color: ColorSettings,
 }
+
+const ERROR: egui::Color32 = egui::Color32::from_rgb(240, 90, 90);
+const WARNING: egui::Color32 = egui::Color32::from_rgb(230, 170, 60);
 
 /// Top of the duration slider; longer values can be typed in.
 const MAX_SLIDER_SECONDS: f64 = 3600.0;
@@ -106,6 +109,8 @@ pub struct MovieDialog {
     output: String,
     status: Status,
     job: Option<MovieJob>,
+    /// ffmpeg's location, looked up when the dialog opens.
+    ffmpeg: Option<PathBuf>,
 }
 
 fn default_output() -> String {
@@ -137,6 +142,7 @@ impl Default for MovieDialog {
             output: String::new(),
             status: Status::Idle,
             job: None,
+            ffmpeg: None,
         }
     }
 }
@@ -155,6 +161,7 @@ impl MovieDialog {
         self.target = start.view.center;
         self.output = default_output();
         self.status = Status::Idle;
+        self.ffmpeg = find_ffmpeg();
     }
 
     /// Start the movie from `start`; `name` is its bookmark (`None` = the
@@ -201,7 +208,7 @@ impl MovieDialog {
         }
     }
 
-    fn launch(&mut self, spec: MovieSpec, threads: usize, ctx: &egui::Context) {
+    fn launch(&mut self, spec: MovieSpec, ffmpeg: PathBuf, threads: usize, ctx: &egui::Context) {
         let (tx, rx) = channel();
         let generation = Arc::new(AtomicU64::new(0));
         let token = CancelToken::new(generation.clone(), 0);
@@ -209,7 +216,7 @@ impl MovieDialog {
         std::thread::spawn(move || {
             let ptx = tx.clone();
             let pctx = ctx.clone();
-            let result = render_movie(&spec, threads, Path::new("ffmpeg"), &token, &mut |p| {
+            let result = render_movie(&spec, threads, &ffmpeg, &token, &mut |p| {
                 let _ = ptx.send(Msg::Progress(p));
                 pctx.request_repaint();
             });
@@ -288,6 +295,9 @@ impl MovieDialog {
             );
             ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks));
             ui.separator();
+            if self.ffmpeg.is_none() && !matches!(self.status, Status::Failed(_)) {
+                ui.colored_label(WARNING, MovieError::FfmpegMissing.to_string());
+            }
             self.status_ui(ui);
             ui.horizontal(|ui| {
                 if running {
@@ -298,9 +308,14 @@ impl MovieDialog {
                     }
                 } else {
                     if ui.button("Render").clicked() {
+                        // Look again: ffmpeg may have been installed meanwhile.
+                        self.ffmpeg = find_ffmpeg();
                         let spec = self.spec(&start);
-                        match spec.validate() {
-                            Ok(()) => self.launch(spec, threads, ctx),
+                        let checked = spec
+                            .validate()
+                            .and_then(|()| self.ffmpeg.clone().ok_or(MovieError::FfmpegMissing));
+                        match checked {
+                            Ok(ffmpeg) => self.launch(spec, ffmpeg, threads, ctx),
                             Err(e) => self.status = Status::Failed(e.to_string()),
                         }
                     }
@@ -482,7 +497,7 @@ impl MovieDialog {
                 ui.label(format!("Saved {}", path.display()));
             }
             Status::Failed(msg) => {
-                ui.colored_label(egui::Color32::from_rgb(240, 90, 90), msg);
+                ui.colored_label(ERROR, msg);
             }
         }
     }

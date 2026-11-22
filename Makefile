@@ -48,7 +48,10 @@ clean: ## Delete build output (target/)
 	cargo clean
 
 install: build ## Copy the release binary to $(PREFIX)/bin (default ~/.local/bin)
-	install -Dm755 $(RELEASE) $(PREFIX)/bin/$(BIN)
+	install -d $(PREFIX)/bin
+	install -m 755 $(RELEASE) $(PREFIX)/bin/$(BIN)
+	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; \
+		*) echo "note: $(PREFIX)/bin is not on your PATH; add it in your shell profile." ;; esac
 
 uninstall: ## Remove the installed binary
 	rm -f $(PREFIX)/bin/$(BIN)

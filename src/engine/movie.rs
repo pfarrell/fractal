@@ -21,7 +21,7 @@ use crate::engine::render::{CancelToken, F64Sampler, render};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -77,7 +77,11 @@ impl std::fmt::Display for MovieError {
             } => {
                 write!(f, "ffmpeg failed (exit {status:?}):\n{stderr_tail}")
             }
-            MovieError::FfmpegMissing => write!(f, "ffmpeg not found on PATH"),
+            MovieError::FfmpegMissing => write!(
+                f,
+                "ffmpeg not found — movie export needs it. {}, then try again.",
+                ffmpeg_install_hint()
+            ),
         }
     }
 }
@@ -86,6 +90,63 @@ impl From<std::io::Error> for MovieError {
     fn from(e: std::io::Error) -> Self {
         MovieError::Io(e)
     }
+}
+
+/// How to install ffmpeg on this platform.
+pub fn ffmpeg_install_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Install it with Homebrew: brew install ffmpeg"
+    } else if cfg!(windows) {
+        "Install it with: winget install ffmpeg"
+    } else {
+        "Install it with your package manager, e.g. sudo apt install ffmpeg \
+         (Debian/Ubuntu) or sudo dnf install ffmpeg (Fedora)"
+    }
+}
+
+/// Folders package managers put ffmpeg in, checked after `PATH`. Apps
+/// launched from the macOS Finder get a minimal `PATH` without Homebrew's.
+pub const FFMPEG_FALLBACK_DIRS: [&str; 4] = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/opt/local/bin",
+    "/usr/bin",
+];
+
+/// Locate the ffmpeg executable: on `PATH`, else in a usual install folder.
+pub fn find_ffmpeg() -> Option<PathBuf> {
+    find_program(
+        "ffmpeg",
+        std::env::var_os("PATH").as_deref(),
+        FFMPEG_FALLBACK_DIRS.iter().map(Path::new),
+    )
+}
+
+/// First executable `name` in the `path_var` folders, then in `fallbacks`.
+pub fn find_program<'a>(
+    name: &str,
+    path_var: Option<&OsStr>,
+    fallbacks: impl IntoIterator<Item = &'a Path>,
+) -> Option<PathBuf> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    path_var
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .chain(fallbacks.into_iter().map(Path::to_path_buf))
+        .map(|dir| dir.join(&file))
+        .find(|p| is_executable(p))
+}
+
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.metadata()
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.is_file()
 }
 
 /// How much of ffmpeg's error output to keep.
