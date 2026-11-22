@@ -6,3 +6,4 @@
 pub mod cli;
 pub mod engine;
 pub mod ui;
+pub mod update;
