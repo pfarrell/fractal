@@ -1,7 +1,7 @@
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::movie::{
-    MovieError, MovieProgress, MovieSpec, ffmpeg_args, render_movie, render_movie_in,
+    MovieError, MovieProgress, MovieSpec, ffmpeg_args, render_movie,
 };
 use fractal_explorer::engine::render::CancelToken;
 use fractal_explorer::engine::viewport::MaxIter;
@@ -58,12 +58,64 @@ fn constant_zoom_ratio() {
     }
 }
 
+/// Distance between two points in units of the frame's pixel size.
+fn pixels_apart(
+    v: &fractal_explorer::engine::viewport::Viewport,
+    a: Complex64,
+    b: Complex64,
+) -> f64 {
+    (a - b).norm() / (v.span / v.height as f64)
+}
+
 #[test]
-fn ends_near_target() {
+fn last_frame_is_centered_on_target() {
     let sp = s();
     let last = sp.frame_view(sp.frame_count() - 1);
-    let bound = (sp.start_center - sp.target).norm() * sp.end_span / sp.start_span + 1e-15;
-    assert!((last.center - sp.target).norm() <= bound);
+    assert!(pixels_apart(&last, last.center, sp.target) < 0.01);
+}
+
+#[test]
+fn off_center_bookmark_end_view_is_hit_exactly() {
+    // End view far from the start view's center, as with a bookmark.
+    let mut sp = s();
+    sp.start_center = Complex64::new(0.0, 0.0);
+    sp.target = Complex64::new(-1.25, 0.4);
+    sp.end_span = 1e-9;
+    let last = sp.frame_view(sp.frame_count() - 1);
+    assert!(pixels_apart(&last, last.center, sp.target) < 0.01);
+    assert!((last.span - 1e-9).abs() < 1e-21);
+}
+
+#[test]
+fn zoom_follows_one_straight_zoom_line() {
+    // Every frame is the start view scaled about one fixed point, so that
+    // point sits on the same pixel in every frame.
+    let mut sp = s();
+    sp.start_center = Complex64::new(0.0, 0.0);
+    sp.target = Complex64::new(-1.25, 0.4);
+    sp.end_span = 1e-3;
+    let r = sp.end_span / sp.start_span;
+    let fixed = (sp.target - sp.start_center * r) / (1.0 - r);
+    let first = sp.frame_view(0).complex_to_pixel(fixed);
+    for i in 1..sp.frame_count() {
+        let (x, y) = sp.frame_view(i).complex_to_pixel(fixed);
+        assert!(
+            (x - first.0).abs() < 1e-6 && (y - first.1).abs() < 1e-6,
+            "frame {i}"
+        );
+    }
+}
+
+#[test]
+fn equal_spans_pan_straight_to_target() {
+    let mut sp = s();
+    sp.end_span = sp.start_span;
+    let n = sp.frame_count();
+    let mid = sp.frame_view((n - 1) / 2);
+    let last = sp.frame_view(n - 1);
+    assert!(mid.center.re.is_finite() && mid.center.im.is_finite());
+    assert!((last.center - sp.target).norm() < 1e-12);
+    assert_eq!(last.span, sp.start_span);
 }
 
 #[test]
@@ -82,13 +134,19 @@ fn validate_rejects_odd_size_and_bad_fps() {
 
 #[test]
 fn ffmpeg_args_exact() {
-    let got = ffmpeg_args(30, Path::new("/tmp/x"), Path::new("/tmp/o.mp4"));
+    let got = ffmpeg_args(30, 64, 48, Path::new("/tmp/o.mp4"));
     let want: Vec<OsString> = [
         "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-video_size",
+        "64x48",
         "-framerate",
         "30",
         "-i",
-        "/tmp/x/frame_%05d.png",
+        "-",
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -103,6 +161,14 @@ fn ffmpeg_args_exact() {
     assert_eq!(got, want);
 }
 
+#[test]
+fn long_durations_are_valid() {
+    let mut sp = s();
+    sp.seconds = 3.0 * 3600.0;
+    assert!(sp.validate().is_ok());
+    assert_eq!(sp.frame_count(), 30 * 3 * 3600);
+}
+
 fn short(out: PathBuf, frames: u32) -> MovieSpec {
     let mut sp = spec(out);
     sp.fps = frames;
@@ -113,19 +179,58 @@ fn short(out: PathBuf, frames: u32) -> MovieSpec {
 }
 
 #[test]
-fn missing_ffmpeg_errors_and_cleans_up() {
-    let parent = tempfile::tempdir().unwrap();
-    let out = parent.path().join("o.mp4");
-    let r = render_movie_in(
-        parent.path(),
-        &short(out, 2),
+fn missing_ffmpeg_errors_before_rendering() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("o.mp4");
+    let mut frames = 0;
+    let r = render_movie(
+        &short(out.clone(), 2),
         2,
         Path::new("/nonexistent/ffmpeg"),
         &CancelToken::never(),
-        &mut |_| {},
+        &mut |p| {
+            if let MovieProgress::Frame { .. } = p {
+                frames += 1
+            }
+        },
     );
     assert!(matches!(r, Err(MovieError::FfmpegMissing)), "{r:?}");
-    assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    assert_eq!(frames, 0, "no frames rendered without an encoder");
+    assert!(!out.exists());
+}
+
+#[test]
+fn encoder_dying_mid_stream_is_reported() {
+    // `false` exits at once with status 1 and never reads its input.
+    let dir = tempfile::tempdir().unwrap();
+    let r = render_movie(
+        &short(dir.path().join("o.mp4"), 30),
+        2,
+        Path::new("false"),
+        &CancelToken::never(),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(
+            r,
+            Err(MovieError::Ffmpeg {
+                status: Some(1),
+                ..
+            })
+        ),
+        "{r:?}"
+    );
+}
+
+fn have_ffmpeg() -> bool {
+    let ok = std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_ok();
+    if !ok {
+        eprintln!("ffmpeg not installed; skipping");
+    }
+    ok
 }
 
 #[test]
@@ -150,12 +255,7 @@ fn unwritable_output_errors() {
 
 #[test]
 fn tiny_movie_end_to_end() {
-    if std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_err()
-    {
-        eprintln!("ffmpeg not installed; skipping");
+    if !have_ffmpeg() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -177,16 +277,37 @@ fn tiny_movie_end_to_end() {
     );
     assert_eq!(r.unwrap(), out);
     assert_eq!(frames, 12);
-    assert!(std::fs::metadata(&out).unwrap().len() > 0);
+    // The encoded file really holds 12 frames of 64×48.
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,nb_read_frames",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&out)
+        .output();
+    if let Ok(probe) = probe {
+        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "64,48,12");
+    }
 }
 
 #[test]
-fn cancel_stops_early() {
+fn cancel_stops_early_and_removes_partial_file() {
+    if !have_ffmpeg() {
+        return;
+    }
     let generation = Arc::new(AtomicU64::new(0));
     let token = CancelToken::new(generation.clone(), 0);
     let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("c.mp4");
     let r = render_movie(
-        &short(dir.path().join("c.mp4"), 10),
+        &short(out.clone(), 10),
         2,
         Path::new("ffmpeg"),
         &token,
@@ -197,6 +318,7 @@ fn cancel_stops_early() {
         },
     );
     assert!(matches!(r, Err(MovieError::Cancelled)), "{r:?}");
+    assert!(!out.exists(), "partial movie left behind");
 }
 
 #[test]

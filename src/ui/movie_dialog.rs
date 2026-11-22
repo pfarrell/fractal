@@ -45,11 +45,57 @@ pub struct MovieStart {
     pub color: ColorSettings,
 }
 
+/// Top of the duration slider; longer values can be typed in.
+const MAX_SLIDER_SECONDS: f64 = 3600.0;
+
+/// "1 h 05 min 03 s" style duration.
+fn format_duration(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+    match (h, m) {
+        (0, 0) => format!("{s} s"),
+        (0, _) => format!("{m} min {s:02} s"),
+        _ => format!("{h} h {m:02} min {s:02} s"),
+    }
+}
+
+/// How fast a zoom of `total_zoom` over `seconds` feels.
+fn zoom_per_second(total_zoom: f64, seconds: f64) -> f64 {
+    total_zoom.powf(1.0 / seconds)
+}
+
 const RESOLUTIONS: [(usize, usize); 3] = [(1280, 720), (1920, 1080), (854, 480)];
+
+impl MovieStart {
+    /// The movie start a bookmark describes, at the given frame size.
+    /// IFS bookmarks can't start a zoom movie.
+    pub fn from_bookmark(view: &BookmarkView, width: usize, height: usize) -> Option<Self> {
+        match *view {
+            BookmarkView::Escape {
+                kind,
+                center,
+                span,
+                max_iter,
+                color,
+            } => Some(Self {
+                kind,
+                view: Viewport::new(center, span, width, height),
+                max_iter,
+                color,
+            }),
+            BookmarkView::Ifs { .. } => None,
+        }
+    }
+}
 
 pub struct MovieDialog {
     open: bool,
+    /// The explorer's view when the dialog opened.
+    current: Option<MovieStart>,
+    /// Where the movie starts: `current` or a bookmark.
     start: Option<MovieStart>,
+    /// Name of the start bookmark (`None` = current view).
+    start_name: Option<String>,
     orbit_point: Option<Complex64>,
     target: Complex64,
     end_magnification: f64,
@@ -78,7 +124,9 @@ impl Default for MovieDialog {
     fn default() -> Self {
         Self {
             open: false,
+            current: None,
             start: None,
+            start_name: None,
             orbit_point: None,
             target: Complex64::new(0.0, 0.0),
             end_magnification: 1e10,
@@ -101,17 +149,39 @@ impl MovieDialog {
     /// Open the dialog starting from the current explorer view.
     pub fn open(&mut self, start: MovieStart, orbit_point: Option<Complex64>) {
         self.open = true;
-        self.start = Some(start);
+        self.current = Some(start);
+        self.choose_start(None, start);
         self.orbit_point = orbit_point;
         self.target = start.view.center;
         self.output = default_output();
         self.status = Status::Idle;
     }
 
+    /// Start the movie from `start`; `name` is its bookmark (`None` = the
+    /// current view).
+    pub fn choose_start(&mut self, name: Option<String>, start: MovieStart) {
+        self.start = Some(start);
+        self.start_name = name;
+    }
+
     /// Use a bookmark's center and zoom as the movie's destination.
     pub fn set_target(&mut self, target: Complex64, magnification: f64) {
         self.target = target;
         self.end_magnification = magnification;
+    }
+
+    /// Duration, frame count, and zoom speed, under the duration slider.
+    fn pace_text(&self) -> String {
+        let frames = (self.fps as f64 * self.seconds).round().max(2.0);
+        let mut text = format!("{} · {frames:.0} frames", format_duration(self.seconds));
+        if let Some(start) = &self.start {
+            let total = start.view.span / (DEFAULT_SPAN / self.end_magnification);
+            if total > 1.0 {
+                let rate = zoom_per_second(total, self.seconds);
+                text += &format!(" · zooms ×{rate:.3} per second");
+            }
+        }
+        text
     }
 
     fn spec(&self, start: &MovieStart) -> MovieSpec {
@@ -204,12 +274,18 @@ impl MovieDialog {
             ui.set_width(420.0);
             ui.heading("Export zoom movie");
             ui.label(format!(
-                "From: {} at {:+.6} {:+.6}i, zoom {:.2e}",
+                "Start ({}): {} at {:+.6} {:+.6}i, zoom {:.2e}",
+                self.start_name.as_deref().unwrap_or("current view"),
                 start.kind.label(),
                 start.view.center.re,
                 start.view.center.im,
                 start.view.magnification()
             ));
+            ui.small(
+                "The movie zooms in a straight line from the start view to the \
+                 end view. The start also sets the fractal, colors and iterations; \
+                 the end only sets where to zoom to and how deep.",
+            );
             ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks));
             ui.separator();
             self.status_ui(ui);
@@ -252,8 +328,9 @@ impl MovieDialog {
                         BookmarkView::Ifs { .. } => None,
                     })
                     .collect();
+                self.start_picker(ui, bookmarks);
                 if !targets.is_empty() {
-                    ui.label("Target from bookmark");
+                    ui.label("End from bookmark");
                     egui::ComboBox::from_id_salt("movie_bookmark")
                         .selected_text("choose…")
                         .show_ui(ui, |ui| {
@@ -265,7 +342,7 @@ impl MovieDialog {
                         });
                     ui.end_row();
                 }
-                ui.label("Zoom toward");
+                ui.label("End center");
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::DragValue::new(&mut self.target.re)
@@ -282,7 +359,7 @@ impl MovieDialog {
                 ui.end_row();
                 if let Some(p) = self.orbit_point {
                     ui.label("");
-                    if ui.button("Use orbit point").clicked() {
+                    if ui.button("Center end on orbit point").clicked() {
                         self.target = p;
                     }
                     ui.end_row();
@@ -307,7 +384,15 @@ impl MovieDialog {
                     });
                 ui.end_row();
                 ui.label("Duration");
-                ui.add(egui::Slider::new(&mut self.seconds, 1.0..=120.0).suffix(" s"));
+                ui.add(
+                    egui::Slider::new(&mut self.seconds, 1.0..=MAX_SLIDER_SECONDS)
+                        .logarithmic(true)
+                        .clamping(egui::SliderClamping::Never)
+                        .suffix(" s"),
+                );
+                ui.end_row();
+                ui.label("");
+                ui.small(self.pace_text());
                 ui.end_row();
                 ui.label("Resolution");
                 ui.horizontal(|ui| {
@@ -337,6 +422,38 @@ impl MovieDialog {
             });
     }
 
+    /// "Start" row: the current view or any escape-time bookmark.
+    fn start_picker(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark]) {
+        let Some(current) = self.current else { return };
+        let (w, h) = (current.view.width, current.view.height);
+        let starts: Vec<(&str, MovieStart)> = bookmarks
+            .iter()
+            .filter_map(|b| Some((b.name.as_str(), MovieStart::from_bookmark(&b.view, w, h)?)))
+            .collect();
+        if starts.is_empty() {
+            return;
+        }
+        ui.label("Start from");
+        let selected = self.start_name.clone();
+        egui::ComboBox::from_id_salt("movie_start")
+            .selected_text(selected.as_deref().unwrap_or("current view"))
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(selected.is_none(), "current view")
+                    .clicked()
+                {
+                    self.choose_start(None, current);
+                }
+                for (name, start) in starts {
+                    let is_sel = selected.as_deref() == Some(name);
+                    if ui.selectable_label(is_sel, name).clicked() {
+                        self.choose_start(Some(name.to_string()), start);
+                    }
+                }
+            });
+        ui.end_row();
+    }
+
     fn status_ui(&self, ui: &mut egui::Ui) {
         match &self.status {
             Status::Idle => {}
@@ -359,7 +476,7 @@ impl MovieDialog {
                 ui.add(egui::ProgressBar::new(frac).text(format!("frame {done}/{total}{eta}")));
             }
             Status::Encoding => {
-                ui.add(egui::ProgressBar::new(1.0).text("encoding with ffmpeg…"));
+                ui.add(egui::ProgressBar::new(1.0).text("finishing encoding…"));
             }
             Status::Done(path) => {
                 ui.label(format!("Saved {}", path.display()));
@@ -368,5 +485,94 @@ impl MovieDialog {
                 ui.colored_label(egui::Color32::from_rgb(240, 90, 90), msg);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::color::PaletteId;
+
+    fn current() -> MovieStart {
+        MovieStart {
+            kind: FractalKind::Mandelbrot,
+            view: Viewport::new(Complex64::new(-0.5, 0.0), 3.0, 800, 600),
+            max_iter: MaxIter::Auto,
+            color: ColorSettings::default(),
+        }
+    }
+
+    fn bookmarked() -> BookmarkView {
+        BookmarkView::Escape {
+            kind: FractalKind::Multibrot { power: 3 },
+            center: Complex64::new(0.1, 0.2),
+            span: 0.5,
+            max_iter: MaxIter::Fixed(900),
+            color: ColorSettings {
+                palette: PaletteId::ALL[1],
+                offset: 0.3,
+                scale: 0.1,
+            },
+        }
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(format_duration(42.0), "42 s");
+        assert_eq!(format_duration(125.0), "2 min 05 s");
+        assert_eq!(format_duration(3903.0), "1 h 05 min 03 s");
+    }
+
+    #[test]
+    fn zoom_speed_halves_in_log_when_duration_doubles() {
+        let fast = zoom_per_second(1e10, 60.0);
+        let slow = zoom_per_second(1e10, 120.0);
+        assert!((slow * slow - fast).abs() < 1e-12);
+        assert!((fast.powf(60.0) / 1e10 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn start_from_bookmark_takes_its_whole_view() {
+        let s = MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap();
+        assert_eq!(s.kind, FractalKind::Multibrot { power: 3 });
+        assert_eq!(s.view.center, Complex64::new(0.1, 0.2));
+        assert_eq!(s.view.span, 0.5);
+        assert_eq!((s.view.width, s.view.height), (800, 600));
+        assert_eq!(s.max_iter, MaxIter::Fixed(900));
+        assert_eq!(s.color.offset, 0.3);
+    }
+
+    #[test]
+    fn ifs_bookmark_cannot_start_a_movie() {
+        let ifs = BookmarkView::Ifs {
+            system: crate::engine::ifs::IfsSystem::barnsley_fern(),
+            center: Complex64::new(0.0, 5.0),
+            span: 10.5,
+            points: 1000,
+            color: ColorSettings::default(),
+        };
+        assert!(MovieStart::from_bookmark(&ifs, 800, 600).is_none());
+    }
+
+    #[test]
+    fn chosen_start_drives_the_spec_and_can_go_back_to_current() {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        d.choose_start(
+            Some("deep".into()),
+            MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap(),
+        );
+        let spec = d.spec(&d.start.unwrap());
+        assert_eq!(spec.start_center, Complex64::new(0.1, 0.2));
+        assert_eq!(spec.start_span, 0.5);
+        assert_eq!(spec.kind, FractalKind::Multibrot { power: 3 });
+        assert_eq!(d.start_name.as_deref(), Some("deep"));
+
+        d.choose_start(None, d.current.unwrap());
+        assert_eq!(
+            d.spec(&d.start.unwrap()).start_center,
+            Complex64::new(-0.5, 0.0)
+        );
+        assert_eq!(d.start_name, None);
     }
 }

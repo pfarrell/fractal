@@ -57,20 +57,62 @@ pub struct OrbitState {
     pub point: Complex64,
     pub path: Vec<Complex64>,
     pub outcome: Sample,
+    /// Following the cursor (true) or frozen at `point` (false).
+    pub live: bool,
 }
 
 /// Orbits drawn on screen are capped at this many steps.
 const ORBIT_MAX_STEPS: u32 = 1000;
 
 impl OrbitState {
+    /// A live orbit starting at `point`.
     pub fn compute(kind: &FractalKind, point: Complex64, max_iter: u32) -> Self {
         let n = max_iter.min(ORBIT_MAX_STEPS);
         Self {
             point,
             path: orbit(kind, point, n),
             outcome: iterate(kind, point, n),
+            live: true,
         }
     }
+}
+
+/// A click on the view: with no orbit, start one that follows the cursor;
+/// on a live orbit, freeze it at the clicked point; on a frozen one, make
+/// it follow the cursor again.
+pub fn click_orbit(
+    orbit: &mut Option<OrbitState>,
+    kind: &FractalKind,
+    p: Complex64,
+    max_iter: u32,
+) {
+    let live = orbit.as_ref().is_none_or(|o| !o.live);
+    *orbit = Some(OrbitState {
+        live,
+        ..OrbitState::compute(kind, p, max_iter)
+    });
+}
+
+/// The cursor moved: a live orbit recomputes from the point under it.
+/// Leaving the view (`None`) keeps the last point.
+pub fn hover_orbit(
+    orbit: &mut Option<OrbitState>,
+    kind: &FractalKind,
+    p: Option<Complex64>,
+    max_iter: u32,
+) {
+    if let (Some(o), Some(p)) = (orbit.as_ref(), p)
+        && o.live
+        && o.point != p
+    {
+        *orbit = Some(OrbitState::compute(kind, p, max_iter));
+    }
+}
+
+/// Where the Julia panel is pinned: at a frozen orbit's point, otherwise
+/// nowhere (it follows the cursor).
+pub fn julia_pin(orbit: Option<&OrbitState>) -> Option<Complex64> {
+    orbit.filter(|o| !o.live).map(|o| o.point)
 }
 
 /// Upload colored pixels into `texture` (creating it if needed).
@@ -178,7 +220,11 @@ impl FractalApp {
                 .explore
                 .max_iter
                 .resolve(self.explore.view.magnification());
-            self.orbit = Some(OrbitState::compute(&self.explore.kind, o.point, max_iter));
+            let live = o.live;
+            self.orbit = Some(OrbitState {
+                live,
+                ..OrbitState::compute(&self.explore.kind, o.point, max_iter)
+            });
         }
     }
 
@@ -267,15 +313,23 @@ impl FractalApp {
                 .exact_size(340.0)
                 .show(ui, |ui| self.julia.show(ui, &color))
                 .inner;
-            if let JuliaAction::OpenInMain(c) = action {
-                self.explore.kind = FractalKind::Julia { c };
-                self.explore.view = self
-                    .explore
-                    .kind
-                    .default_view(self.explore.view.width, self.explore.view.height);
-                self.orbit = None;
-                self.julia.cancel();
-                self.needs_render = true;
+            match action {
+                JuliaAction::None => {}
+                JuliaAction::Unpin => {
+                    if let Some(o) = &mut self.orbit {
+                        o.live = true;
+                    }
+                }
+                JuliaAction::OpenInMain(c) => {
+                    self.explore.kind = FractalKind::Julia { c };
+                    self.explore.view = self
+                        .explore
+                        .kind
+                        .default_view(self.explore.view.width, self.explore.view.height);
+                    self.orbit = None;
+                    self.julia.cancel();
+                    self.needs_render = true;
+                }
             }
         }
 
@@ -296,18 +350,19 @@ impl FractalApp {
                 }
                 self.needs_render |= resp.view_changed;
                 self.cursor = resp.hovered;
+                let max_iter = self
+                    .explore
+                    .max_iter
+                    .resolve(self.explore.view.magnification());
+                let kind = self.explore.kind;
+                if let Some(p) = resp.clicked {
+                    click_orbit(&mut self.orbit, &kind, p, max_iter);
+                } else {
+                    hover_orbit(&mut self.orbit, &kind, resp.hovered, max_iter);
+                }
+                self.julia.pinned = julia_pin(self.orbit.as_ref());
                 if julia_on {
                     self.julia.hover(resp.hovered);
-                }
-                if let Some(p) = resp.clicked {
-                    let max_iter = self
-                        .explore
-                        .max_iter
-                        .resolve(self.explore.view.magnification());
-                    self.orbit = Some(OrbitState::compute(&self.explore.kind, p, max_iter));
-                    if julia_on {
-                        self.julia.pinned = Some(p);
-                    }
                 }
                 if let Some(o) = &self.orbit {
                     draw_orbit(ui, &resp.mapping, &self.explore.view, &o.path);
@@ -467,5 +522,59 @@ mod tests {
         assert_eq!(o.path.len(), ORBIT_MAX_STEPS as usize + 1);
         assert_eq!(o.path[1], Complex64::new(-1.0, 0.0));
         assert_eq!(o.path[2], Complex64::new(0.0, 0.0));
+    }
+
+    const M: FractalKind = FractalKind::Mandelbrot;
+    const A: Complex64 = Complex64::new(-1.0, 0.0);
+    const B: Complex64 = Complex64::new(0.25, 0.5);
+
+    #[test]
+    fn first_click_starts_a_live_orbit() {
+        let mut o = None;
+        click_orbit(&mut o, &M, A, 100);
+        let o = o.unwrap();
+        assert!(o.live);
+        assert_eq!(o.point, A);
+    }
+
+    #[test]
+    fn live_orbit_follows_hover() {
+        let mut o = None;
+        click_orbit(&mut o, &M, A, 100);
+        hover_orbit(&mut o, &M, Some(B), 100);
+        assert_eq!(o.as_ref().unwrap().point, B);
+        assert_eq!(o.as_ref().unwrap().path[1], B);
+        // Leaving the view keeps the last point.
+        hover_orbit(&mut o, &M, None, 100);
+        assert_eq!(o.unwrap().point, B);
+    }
+
+    #[test]
+    fn second_click_freezes_and_third_resumes() {
+        let mut o = None;
+        click_orbit(&mut o, &M, A, 100);
+        click_orbit(&mut o, &M, B, 100);
+        assert!(!o.as_ref().unwrap().live);
+        assert_eq!(o.as_ref().unwrap().point, B);
+        hover_orbit(&mut o, &M, Some(A), 100);
+        assert_eq!(o.as_ref().unwrap().point, B, "frozen orbit ignores hover");
+        click_orbit(&mut o, &M, A, 100);
+        assert!(o.as_ref().unwrap().live);
+    }
+
+    #[test]
+    fn julia_is_pinned_only_while_orbit_is_frozen() {
+        let mut o = None;
+        assert_eq!(julia_pin(o.as_ref()), None);
+        click_orbit(&mut o, &M, A, 100);
+        assert_eq!(
+            julia_pin(o.as_ref()),
+            None,
+            "live orbit: Julia follows cursor"
+        );
+        click_orbit(&mut o, &M, B, 100);
+        assert_eq!(julia_pin(o.as_ref()), Some(B));
+        o = None; // "Clear orbit"
+        assert_eq!(julia_pin(o.as_ref()), None, "cleared: Julia previews again");
     }
 }

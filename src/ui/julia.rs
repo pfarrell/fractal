@@ -35,13 +35,16 @@ pub fn julia_threads(main_threads: usize) -> usize {
 /// Something the user asked for from the panel.
 pub enum JuliaAction {
     None,
+    /// Stop pinning: resume following the cursor.
+    Unpin,
     /// Switch the main view to this Julia set.
     OpenInMain(Complex64),
 }
 
 pub struct JuliaPanel {
     pub visible: bool,
-    /// c fixed by a click; the panel stops following the cursor.
+    /// c fixed by a frozen orbit (set by the app); the panel stops
+    /// following the cursor.
     pub pinned: Option<Complex64>,
     /// c under the cursor.
     pub follow: Option<Complex64>,
@@ -144,10 +147,10 @@ impl JuliaPanel {
                 ui.horizontal(|ui| {
                     if self.pinned.is_some() {
                         if ui.button("Unpin").clicked() {
-                            self.pinned = None;
+                            action = JuliaAction::Unpin;
                         }
                     } else {
-                        ui.label("click to pin");
+                        ui.label("click twice to pin");
                     }
                     if ui.button("Open in main view").clicked() {
                         action = JuliaAction::OpenInMain(c);

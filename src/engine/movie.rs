@@ -1,10 +1,19 @@
-//! Zoom movies: render a sequence of frames zooming toward a point, then
-//! encode them to MP4 with `ffmpeg`.
+//! Zoom movies: render a sequence of frames zooming toward a point and
+//! stream them straight into `ffmpeg` as raw RGBA, so a movie of any
+//! length needs no disk space beyond the finished file.
 //!
 //! The zoom is geometric: every frame is the same factor deeper than the
-//! last, so the zoom feels like constant speed. The view zooms about the
-//! target point P: center(t) = P + (c₀ − P)·span(t)/span₀, which keeps P
-//! fixed on screen while everything else rushes outward.
+//! last, so the zoom feels like constant speed. The first frame is the
+//! start view (center c₀, span s₀) and the last is the end view (center
+//! `target` = c₁, span s₁). Every frame in between is the start view
+//! scaled about one fixed point Q — the "zoom line" — chosen so that
+//! scaling by r = s₁/s₀ carries c₀ onto c₁:
+//!
+//! Q = (c₁ − c₀·r) / (1 − r),   center(t) = Q + (c₀ − Q)·span(t)/s₀.
+//!
+//! Q stays on the same pixel throughout while everything else rushes
+//! outward from it. With no zoom (r = 1) there is no fixed point, so the
+//! center pans in a straight line instead.
 
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::FractalKind;
@@ -13,9 +22,9 @@ use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -135,17 +144,39 @@ impl MovieSpec {
 
     pub fn frame_view(&self, i: usize) -> Viewport {
         let t = i as f64 / (self.frame_count() - 1) as f64;
-        let span = self.start_span * (self.end_span / self.start_span).powf(t);
-        let center = self.target + (self.start_center - self.target) * (span / self.start_span);
+        let r = self.end_span / self.start_span;
+        let span = self.start_span * r.powf(t);
+        let (c0, c1) = (self.start_center, self.target);
+        let center = if (1.0 - r).abs() < 1e-9 {
+            c0 + (c1 - c0) * t
+        } else {
+            let fixed = (c1 - c0 * r) / (1.0 - r);
+            fixed + (c0 - fixed) * (span / self.start_span)
+        };
         Viewport::new(center, span, self.width, self.height)
     }
 }
 
-pub fn ffmpeg_args(fps: u32, frames_dir: &Path, output: &Path) -> Vec<OsString> {
-    let mut args: Vec<OsString> = ["-y", "-framerate"].iter().map(OsString::from).collect();
-    args.push(fps.to_string().into());
-    args.push("-i".into());
-    args.push(frames_dir.join("frame_%05d.png").into_os_string());
+/// ffmpeg reads raw RGBA frames of `width`×`height` from stdin.
+pub fn ffmpeg_args(fps: u32, width: usize, height: usize, output: &Path) -> Vec<OsString> {
+    let size = format!("{width}x{height}");
+    let fps = fps.to_string();
+    let mut args: Vec<OsString> = [
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-video_size",
+        &size,
+        "-framerate",
+        &fps,
+        "-i",
+        "-",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
     for a in ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"] {
         args.push(a.into());
     }
@@ -153,7 +184,12 @@ pub fn ffmpeg_args(fps: u32, frames_dir: &Path, output: &Path) -> Vec<OsString> 
     args
 }
 
-/// Render and encode a movie, keeping frames in the system temp dir.
+/// Frames rendered ahead of the encoder. Each is width×height×4 bytes.
+const FRAMES_IN_FLIGHT: usize = 2;
+
+/// Render a movie, streaming each frame into ffmpeg as it's done.
+/// Rendering the next frame overlaps encoding the last. On failure or
+/// cancel, a partial output file this run created is removed.
 pub fn render_movie(
     spec: &MovieSpec,
     threads: usize,
@@ -161,37 +197,81 @@ pub fn render_movie(
     cancel: &CancelToken,
     progress: &mut dyn FnMut(MovieProgress),
 ) -> Result<PathBuf, MovieError> {
-    render_movie_in(
-        &std::env::temp_dir(),
-        spec,
-        threads,
-        ffmpeg,
-        cancel,
-        progress,
-    )
-}
-
-/// Like [`render_movie`], with the frames' temporary directory created
-/// under `temp_parent`. The directory is deleted on every exit path.
-pub fn render_movie_in(
-    temp_parent: &Path,
-    spec: &MovieSpec,
-    threads: usize,
-    ffmpeg: &Path,
-    cancel: &CancelToken,
-    progress: &mut dyn FnMut(MovieProgress),
-) -> Result<PathBuf, MovieError> {
     spec.validate()?;
-    let frames = tempfile::Builder::new()
-        .prefix("fractal-movie-")
-        .tempdir_in(temp_parent)?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads.max(1))
         .build()
         .map_err(|e| MovieError::Invalid(e.to_string()))?;
+    let existed_before = spec.output.exists();
+    let mut child = Command::new(ffmpeg)
+        .args(ffmpeg_args(spec.fps, spec.width, spec.height, &spec.output))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => MovieError::FfmpegMissing,
+            _ => MovieError::Io(e),
+        })?;
+    // Drain stderr on a thread so ffmpeg can't block on a full pipe.
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let stderr_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    // A writer thread feeds ffmpeg, so a stalled encoder never blocks the
+    // render loop's cancel checks. Dropping `tx` closes ffmpeg's stdin.
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(FRAMES_IN_FLIGHT);
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for frame in rx {
+            stdin.write_all(&frame)?;
+        }
+        Ok(())
+    });
+
+    let rendered = render_frames(spec, &pool, cancel, &tx, progress);
+    drop(tx);
+    let result = match rendered {
+        Ok(()) => {
+            progress(MovieProgress::Encoding);
+            let wrote = writer
+                .join()
+                .unwrap_or_else(|_| Err(std::io::Error::other("writer panicked")));
+            finish(&mut child, stderr_reader, cancel, wrote)
+        }
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writer.join();
+            Err(e)
+        }
+    };
+    match result {
+        Ok(()) => {
+            progress(MovieProgress::Done(spec.output.clone()));
+            Ok(spec.output.clone())
+        }
+        Err(e) => {
+            if !existed_before {
+                let _ = std::fs::remove_file(&spec.output);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Render every frame and hand it to the writer thread.
+fn render_frames(
+    spec: &MovieSpec,
+    pool: &rayon::ThreadPool,
+    cancel: &CancelToken,
+    tx: &std::sync::mpsc::SyncSender<Vec<u8>>,
+    progress: &mut dyn FnMut(MovieProgress),
+) -> Result<(), MovieError> {
     let total = spec.frame_count();
     let mut pixels = vec![[0u8; 4]; spec.width * spec.height];
-
     for i in 0..total {
         if cancel.is_cancelled() {
             return Err(MovieError::Cancelled);
@@ -202,54 +282,29 @@ pub fn render_movie_in(
             kind: spec.kind,
             max_iter: spec.max_iter.resolve(view.magnification()),
         };
-        let samples = render(&sampler, &view, &pool, cancel).ok_or(MovieError::Cancelled)?;
+        let samples = render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled)?;
         colorize(&samples, &spec.color, &mut pixels);
-        let path = frames.path().join(format!("frame_{i:05}.png"));
-        image::save_buffer(
-            &path,
-            pixels.as_flattened(),
-            spec.width as u32,
-            spec.height as u32,
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|e| MovieError::Io(std::io::Error::other(e)))?;
+        if tx.send(pixels.as_flattened().to_vec()).is_err() {
+            // The writer stopped: ffmpeg exited early. `finish` reports why.
+            return Ok(());
+        }
         progress(MovieProgress::Frame {
             done: i + 1,
             total,
             last_frame_ms: start.elapsed().as_millis() as u64,
         });
     }
-
-    progress(MovieProgress::Encoding);
-    encode(ffmpeg, spec, frames.path(), cancel)?;
-    progress(MovieProgress::Done(spec.output.clone()));
-    Ok(spec.output.clone())
+    Ok(())
 }
 
-/// Run ffmpeg, killing it if cancelled.
-fn encode(
-    ffmpeg: &Path,
-    spec: &MovieSpec,
-    frames_dir: &Path,
+/// Wait for ffmpeg to finish encoding (killing it if cancelled) and turn
+/// its exit status into a result.
+fn finish(
+    child: &mut Child,
+    stderr_reader: std::thread::JoinHandle<String>,
     cancel: &CancelToken,
+    wrote: std::io::Result<()>,
 ) -> Result<(), MovieError> {
-    let mut child = Command::new(ffmpeg)
-        .args(ffmpeg_args(spec.fps, frames_dir, &spec.output))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => MovieError::FfmpegMissing,
-            _ => MovieError::Io(e),
-        })?;
-    // Drain stderr on a thread so ffmpeg can't block on a full pipe.
-    let mut stderr = child.stderr.take().expect("stderr piped");
-    let reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
-    });
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -261,9 +316,10 @@ fn encode(
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let err = reader.join().unwrap_or_default();
+    let err = stderr_reader.join().unwrap_or_default();
     if status.success() {
-        return Ok(());
+        // ffmpeg can't succeed without reading every frame, but be sure.
+        return wrote.map_err(MovieError::Io);
     }
     let tail_start = err.len().saturating_sub(STDERR_TAIL_BYTES);
     let tail_start = (tail_start..err.len())

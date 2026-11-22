@@ -1,6 +1,6 @@
 //! The left-hand control panel for escape-time fractals.
 
-use crate::engine::color::PaletteId;
+use crate::engine::color::{ColorSettings, PaletteId};
 use crate::engine::escape::FractalKind;
 use crate::engine::escape::Sample;
 use crate::engine::newton::NewtonPoly;
@@ -127,6 +127,16 @@ pub fn explore_panel(
                 .text("scale"),
         )
         .changed();
+    let defaults = ColorSettings::default();
+    let at_defaults = state.color.offset == defaults.offset && state.color.scale == defaults.scale;
+    if ui
+        .add_enabled(!at_defaults, egui::Button::new("Reset offset & scale"))
+        .clicked()
+    {
+        state.color.offset = defaults.offset;
+        state.color.scale = defaults.scale;
+        ch.color = true;
+    }
 
     ui.separator();
     ui.heading("Performance");
@@ -164,6 +174,11 @@ pub fn orbit_panel(ui: &mut egui::Ui, orbit: &OrbitState) -> bool {
         "start {:+.6} {:+.6}i",
         orbit.point.re, orbit.point.im
     ));
+    ui.label(if orbit.live {
+        "following the cursor · click to freeze"
+    } else {
+        "frozen · click to follow the cursor"
+    });
     let steps = orbit.path.len().saturating_sub(1);
     ui.label(match orbit.outcome {
         Sample::Escaped { iter, .. } => format!("escaped after {iter} steps"),
