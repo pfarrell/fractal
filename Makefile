@@ -3,7 +3,8 @@
 # Find cargo even in shells that haven't sourced ~/.cargo/env.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-BIN     := fractal-explorer
+BIN     := fractal
+OLD_BIN := fractal-explorer
 RELEASE := target/release/$(BIN)
 PREFIX  ?= $(HOME)/.local
 ARGS    ?=
@@ -50,8 +51,9 @@ clean: ## Delete build output (target/)
 install: build ## Copy the release binary to $(PREFIX)/bin (default ~/.local/bin)
 	install -d $(PREFIX)/bin
 	install -m 755 $(RELEASE) $(PREFIX)/bin/$(BIN)
+	rm -f $(PREFIX)/bin/$(OLD_BIN)
 	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; \
 		*) echo "note: $(PREFIX)/bin is not on your PATH; add it in your shell profile." ;; esac
 
 uninstall: ## Remove the installed binary
-	rm -f $(PREFIX)/bin/$(BIN)
+	rm -f $(PREFIX)/bin/$(BIN) $(PREFIX)/bin/$(OLD_BIN)
