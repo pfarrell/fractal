@@ -807,3 +807,42 @@ fn exact_quality_is_unchanged() {
         assert!(got == want, "frame {i}");
     }
 }
+
+#[test]
+fn cancel_during_a_later_keyframe_keeps_the_earlier_stretch() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("k.mp4");
+    let sp = keyframe_spec(out.clone(), Quality::Smooth);
+    let blocks = plan(&sp, 2, KEYFRAME_MAX_PIXELS);
+    let Some(Block::Keyframe(first)) = blocks.first() else {
+        panic!("want a keyframe first: {blocks:?}");
+    };
+    assert!(matches!(blocks.get(1), Some(Block::Keyframe(_))));
+    let generation = Arc::new(AtomicU64::new(0));
+    let token = CancelToken::new(generation.clone(), 0);
+    // Cancel as the second keyframe starts: the first stretch is all sent.
+    let r = render_movie(&sp, 2, Path::new("ffmpeg"), &token, &mut |p| {
+        if let MovieProgress::Keyframe { done: 1, .. } = p {
+            generation.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let Err(MovieError::Cancelled {
+        kept:
+            Some(Kept {
+                path,
+                frames,
+                finished: true,
+            }),
+    }) = r
+    else {
+        panic!("{r:?}");
+    };
+    assert_eq!(path, out);
+    assert_eq!(frames, first.frames.len());
+    if let Some(playable) = decodable_frames(&out) {
+        assert_eq!(playable, frames);
+    }
+}
