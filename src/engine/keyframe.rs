@@ -325,6 +325,8 @@ pub fn render_keyframe(
     for row0 in (0..h).step_by(KEYFRAME_BAND_ROWS) {
         let rows = KEYFRAME_BAND_ROWS.min(h - row0);
         let mid = (row0 as f64 + rows as f64 / 2.0 - h as f64 / 2.0) * scale;
+        // `render` takes only the band's size from this; `BandSampler`
+        // places every point on the keyframe's own grid.
         let band = Viewport::new(
             Complex64::new(view.center.re, view.center.im - mid),
             rows as f64 * scale,
@@ -356,7 +358,7 @@ pub fn resample(
     pool: &rayon::ThreadPool,
     out: &mut [[u8; 4]],
 ) {
-    debug_assert_eq!(out.len(), frame.width * frame.height);
+    assert_eq!(out.len(), frame.width * frame.height);
     debug_assert_eq!(kf.data.len(), kf.view.width * kf.view.height);
     if frame.is_empty() || kf.view.is_empty() {
         return;

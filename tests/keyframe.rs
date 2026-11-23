@@ -466,7 +466,13 @@ fn seahorse(quality: Quality, rotation: f64) -> MovieSpec {
 
 /// Frame `i` rendered Exact at 8×8 samples per pixel, averaged in linear light.
 fn supersampled(spec: &MovieSpec, i: usize) -> Vec<[u8; 4]> {
-    const N: usize = 8;
+    supersampled_by(spec, i, 8)
+}
+
+/// Frame `i` rendered Exact at `N`×`N` samples per pixel, averaged in
+/// linear light. `N` = 1 is the Exact movie frame itself.
+#[allow(non_snake_case)]
+fn supersampled_by(spec: &MovieSpec, i: usize, N: usize) -> Vec<[u8; 4]> {
     let view = spec.frame_view(i);
     let big = view.with_size(view.width * N, view.height * N);
     let sampler = RotatedSampler {
@@ -521,19 +527,27 @@ fn smooth_agrees_with_supersampled_exact() {
 
 #[test]
 fn no_pulse_between_keyframes() {
-    // Bounds tuned once against this movie: Smooth measured 2.78 %, Fast
-    // 4.50 %. What's left is the gap between 2×2 and 4×4 area filtering
-    // (Exact 2×2 vs 4×4 supersampling differ about as much here).
-    for (quality, bound) in [(Quality::Smooth, 0.035), (Quality::Fast, 0.05)] {
+    // At every stretch boundary, switching keyframes must jump less than
+    // the shimmer Exact already has on that frame: its own 1×1 frame's
+    // error against the 8×8 reference. Fast (1 tap per keyframe sample at
+    // the deepest frame) measured 1.02–1.08× Exact's error, so it gets 1.5×.
+    for (quality, slack) in [(Quality::Smooth, 1.0), (Quality::Fast, 1.5)] {
         let spec = seahorse(quality, 0.0);
         let blocks = plan(&spec, quality.q().unwrap(), KEYFRAME_MAX_PIXELS);
-        let mut it = stretches(&blocks);
-        let (s0, s1) = (it.next().unwrap(), it.next().unwrap());
-        assert_eq!(s0.frames.end, s1.frames.start);
-        // The first frame of the second stretch, from the keyframe of the
-        // stretch that ends there and of the one that starts there.
-        let i = s1.frames.start;
-        let diff = mean_abs_diff(&from_keyframe(&spec, s0, i), &from_keyframe(&spec, s1, i));
-        assert!(diff < bound * 255.0, "{quality:?}: {diff}");
+        let all: Vec<_> = stretches(&blocks).collect();
+        assert!(all.len() >= 4, "{quality:?}: only {} stretches", all.len());
+        for pair in all.windows(2) {
+            let (s0, s1) = (pair[0], pair[1]);
+            assert_eq!(s0.frames.end, s1.frames.start);
+            // The first frame of the later stretch, from the keyframe of the
+            // stretch that ends there and of the one that starts there.
+            let i = s1.frames.start;
+            let jump = mean_abs_diff(&from_keyframe(&spec, s0, i), &from_keyframe(&spec, s1, i));
+            let exact = mean_abs_diff(&supersampled_by(&spec, i, 1), &supersampled(&spec, i));
+            assert!(
+                jump < slack * exact,
+                "{quality:?} frame {i}: switch {jump:.2} vs Exact error {exact:.2}"
+            );
+        }
     }
 }
