@@ -357,25 +357,28 @@ const SEAHORSE: Complex64 = Complex64::new(-0.7453, 0.1127);
 
 #[test]
 fn keyframe_matches_a_plain_render() {
-    // 150 rows: two full bands and a partial one.
-    let view = Viewport::new(Complex64::new(-0.74, 0.12), 0.05, 173, 150);
-    let s = Stretch {
-        frames: 0..1,
-        view,
-        q: 2,
-        max_iter: 300,
-    };
-    let kind = FractalKind::Mandelbrot;
-    let kf = render_keyframe(kind, &s, &pool(), &CancelToken::never()).unwrap();
-    assert_eq!(kf.view, view);
-    let want: Vec<_> = plain_render(kind, &view, 300)
-        .into_iter()
-        .map(pack)
-        .collect();
-    assert!(
-        kf.data == want,
-        "banded keyframe differs from a plain render"
-    );
+    // Two full bands and a partial one, at 256 rows a band and (wide
+    // enough that a band is held to a 1080p frame's samples) at 172.
+    for (width, height) in [(173, 600), (12_000, 400)] {
+        let view = Viewport::new(Complex64::new(-0.74, 0.12), 0.05, width, height);
+        let s = Stretch {
+            frames: 0..1,
+            view,
+            q: 2,
+            max_iter: 300,
+        };
+        let kind = FractalKind::Mandelbrot;
+        let kf = render_keyframe(kind, &s, &pool(), &CancelToken::never()).unwrap();
+        assert_eq!(kf.view, view);
+        let want: Vec<_> = plain_render(kind, &view, 300)
+            .into_iter()
+            .map(pack)
+            .collect();
+        assert!(
+            kf.data == want,
+            "{width}×{height}: banded keyframe differs from a plain render"
+        );
+    }
 }
 
 #[test]

@@ -353,8 +353,15 @@ pub fn linear_to_srgb(x: f32) -> u8 {
 }
 
 /// Keyframe rows rendered (and packed) at a time, so a whole keyframe of
-/// unpacked samples never exists.
-const KEYFRAME_BAND_ROWS: usize = 64;
+/// unpacked samples never exists: up to 256, fewer for wide keyframes so a
+/// band holds no more samples than a 1080p frame. Each band ends in a wait
+/// for its slowest row; 256 rows keep cores ~94% busy where 64 managed
+/// ~88% (1080p turning zoom, 12 threads).
+fn keyframe_band_rows(width: usize) -> usize {
+    const MAX_ROWS: usize = 256;
+    const MAX_SAMPLES: usize = 1920 * 1080;
+    (MAX_SAMPLES / width.max(1)).clamp(1, MAX_ROWS)
+}
 
 /// A stretch's rendered keyframe: packed samples, row-major,
 /// `view.width × view.height`.
@@ -378,7 +385,7 @@ impl Sampler for BandSampler<'_> {
     }
 }
 
-/// Render `s`'s keyframe in bands of [`KEYFRAME_BAND_ROWS`], packing each
+/// Render `s`'s keyframe in bands of [`keyframe_band_rows`], packing each
 /// band as it finishes. `None` if cancelled.
 pub fn render_keyframe(
     kind: FractalKind,
@@ -393,8 +400,9 @@ pub fn render_keyframe(
         max_iter: s.max_iter,
     };
     let mut data = Vec::with_capacity(w * h);
-    for row0 in (0..h).step_by(KEYFRAME_BAND_ROWS) {
-        let rows = KEYFRAME_BAND_ROWS.min(h - row0);
+    let band_rows = keyframe_band_rows(w);
+    for row0 in (0..h).step_by(band_rows) {
+        let rows = band_rows.min(h - row0);
         let mid = (row0 as f64 + rows as f64 / 2.0 - h as f64 / 2.0) * scale;
         // `render` takes only the band's size from this; `BandSampler`
         // places every point on the keyframe's own grid.
