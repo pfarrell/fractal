@@ -304,9 +304,10 @@ impl MovieDialog {
                 start.view.magnification()
             ));
             ui.small(
-                "The movie zooms in a straight line from the start view to the \
-                 end view. The start also sets the fractal, colors and iterations; \
-                 the end only sets where to zoom to and how deep.",
+                "The movie zooms from the start view to the end view, straight in \
+                 or circling the target (Path), optionally turning (Rotation). The \
+                 start also sets the fractal, colors and iterations; the end only \
+                 sets where to zoom to and how deep.",
             );
             ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks));
             ui.separator();

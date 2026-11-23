@@ -1,7 +1,7 @@
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::movie::{
-    CIRCLE_PERIOD_S, CIRCLE_RADIUS, CameraPath, MovieError, MovieProgress, MovieSpec,
+    CIRCLE_PERIOD_S, CIRCLE_RADIUS, CameraPath, Kept, MovieError, MovieProgress, MovieSpec,
     RotatedSampler, ffmpeg_args, ffmpeg_install_hint, find_program, render_movie, rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
@@ -506,7 +506,12 @@ fn cancel_keeps_the_frames_rendered_so_far() {
         let out = dir.path().join(format!("c.{ext}"));
         let r = cancel_after(&short(out.clone(), 30), 5);
         let Err(MovieError::Cancelled {
-            kept: Some((path, n)),
+            kept:
+                Some(Kept {
+                    path,
+                    frames: n,
+                    finished: true,
+                }),
         }) = r
         else {
             panic!("{ext}: {r:?}");
@@ -518,6 +523,41 @@ fn cancel_keeps_the_frames_rendered_so_far() {
             assert_eq!(playable, n, "{ext}");
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancel_where_the_encoder_fails_to_finish_says_so() {
+    // A stand-in encoder that writes its output file, reads every frame,
+    // and then fails instead of closing the movie properly.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let enc = dir.path().join("bad-encoder");
+    std::fs::write(
+        &enc,
+        "#!/bin/sh\nfor a; do out=$a; done\ncat > \"$out\"\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = dir.path().join("c.mp4");
+    let generation = Arc::new(AtomicU64::new(0));
+    let token = CancelToken::new(generation.clone(), 0);
+    let r = render_movie(&short(out.clone(), 30), 2, &enc, &token, &mut |p| {
+        if let MovieProgress::Frame { done: 3, .. } = p {
+            generation.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let Err(
+        e @ MovieError::Cancelled {
+            kept: Some(Kept {
+                finished: false, ..
+            }),
+        },
+    ) = &r
+    else {
+        panic!("{r:?}");
+    };
+    assert!(e.to_string().contains("may hold fewer"), "{e}");
 }
 
 #[test]
@@ -537,12 +577,25 @@ fn cancel_before_any_frame_leaves_no_file() {
 
 #[test]
 fn cancelled_message_says_where_the_frames_are() {
-    let e = MovieError::Cancelled {
-        kept: Some((PathBuf::from("/m/z.mp4"), 42)),
+    let kept = |frames, finished| MovieError::Cancelled {
+        kept: Some(Kept {
+            path: PathBuf::from("/m/z.mp4"),
+            frames,
+            finished,
+        }),
     };
     assert_eq!(
-        e.to_string(),
+        kept(42, true).to_string(),
         "cancelled; the 42 frames rendered are in /m/z.mp4"
+    );
+    assert_eq!(
+        kept(1, true).to_string(),
+        "cancelled; the 1 frame rendered is in /m/z.mp4"
+    );
+    assert_eq!(
+        kept(42, false).to_string(),
+        "cancelled; ffmpeg didn't finish the file, so /m/z.mp4 may hold fewer \
+         than the 42 frames rendered"
     );
     let e = MovieError::Cancelled { kept: None };
     assert_eq!(e.to_string(), "cancelled");

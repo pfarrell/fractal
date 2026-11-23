@@ -14,6 +14,11 @@
 //! Q stays on the same pixel throughout while everything else rushes
 //! outward from it. With no zoom (r = 1) there is no fixed point, so the
 //! center pans in a straight line instead.
+//!
+//! That is the `Straight` camera path. `Circle` adds a drift of up to
+//! [`CIRCLE_RADIUS`] spans around that center, so Q circles the screen
+//! instead of staying put, and `rotation` turns each frame about the
+//! screen center. The drift is zero on the first and last frames.
 
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate};
@@ -117,13 +122,23 @@ pub enum MovieProgress {
     Done(PathBuf),
 }
 
+/// What a cancelled movie left behind.
+#[derive(Debug)]
+pub struct Kept {
+    pub path: PathBuf,
+    /// Frames rendered and handed to ffmpeg.
+    pub frames: usize,
+    /// ffmpeg closed the file cleanly, so it holds all of `frames`.
+    /// Otherwise it was stopped or failed and may hold fewer.
+    pub finished: bool,
+}
+
 #[derive(Debug)]
 pub enum MovieError {
     Invalid(String),
-    /// Stopped by the user. `kept` is the output file and how many frames
-    /// it holds, when any were rendered.
+    /// Stopped by the user. `kept` is set when any frames were rendered.
     Cancelled {
-        kept: Option<(PathBuf, usize)>,
+        kept: Option<Kept>,
     },
     Io(std::io::Error),
     Ffmpeg {
@@ -138,13 +153,19 @@ impl std::fmt::Display for MovieError {
         match self {
             MovieError::Invalid(why) => write!(f, "invalid settings: {why}"),
             MovieError::Cancelled { kept: None } => write!(f, "cancelled"),
-            MovieError::Cancelled {
-                kept: Some((path, n)),
-            } => write!(
-                f,
-                "cancelled; the {n} frames rendered are in {}",
-                path.display()
-            ),
+            MovieError::Cancelled { kept: Some(k) } => {
+                let path = k.path.display();
+                let n = k.frames;
+                match (k.finished, n) {
+                    (true, 1) => write!(f, "cancelled; the 1 frame rendered is in {path}"),
+                    (true, _) => write!(f, "cancelled; the {n} frames rendered are in {path}"),
+                    (false, _) => write!(
+                        f,
+                        "cancelled; ffmpeg didn't finish the file, so {path} may hold \
+                         fewer than the {n} frames rendered"
+                    ),
+                }
+            }
             MovieError::Io(e) => write!(f, "file error: {e}"),
             MovieError::Ffmpeg {
                 status,
@@ -420,16 +441,32 @@ pub fn render_movie(
             // stdin is closed once the writer drains, so ffmpeg encodes
             // what it has and finalizes the file.
             progress(MovieProgress::Encoding);
-            wind_down(&mut child);
+            let finished = wind_down(&mut child);
             let _ = writer.join();
-            Err(MovieError::Cancelled { kept: None })
+            Err(MovieError::Cancelled {
+                kept: Some(Kept {
+                    path: spec.output.clone(),
+                    frames: sent,
+                    finished,
+                }),
+            })
         }
         Ok(()) => {
             progress(MovieProgress::Encoding);
             let wrote = writer
                 .join()
                 .unwrap_or_else(|_| Err(std::io::Error::other("writer panicked")));
-            finish(&mut child, stderr_reader, cancel, wrote)
+            finish(&mut child, stderr_reader, cancel, wrote).map_err(|e| match e {
+                MovieError::Cancelled { kept: Some(k) } if sent > 0 => MovieError::Cancelled {
+                    kept: Some(Kept {
+                        path: spec.output.clone(),
+                        frames: sent,
+                        ..k
+                    }),
+                },
+                MovieError::Cancelled { .. } => MovieError::Cancelled { kept: None },
+                e => e,
+            })
         }
         Err(e) => {
             let _ = child.kill();
@@ -443,9 +480,7 @@ pub fn render_movie(
             progress(MovieProgress::Done(spec.output.clone()));
             Ok(spec.output.clone())
         }
-        Err(MovieError::Cancelled { .. }) if sent > 0 => Err(MovieError::Cancelled {
-            kept: Some((spec.output.clone(), sent)),
-        }),
+        Err(e @ MovieError::Cancelled { kept: Some(_) }) => Err(e),
         Err(e) => {
             if !existed_before {
                 let _ = std::fs::remove_file(&spec.output);
@@ -494,18 +529,21 @@ fn render_frames(
     Ok(())
 }
 
-/// Let ffmpeg exit on its own within [`CANCEL_GRACE`], else kill it. A
-/// killed fragmented MP4 still plays up to its last finished fragment.
-fn wind_down(child: &mut Child) {
+/// Let ffmpeg exit on its own within [`CANCEL_GRACE`], else kill it.
+/// Returns whether it exited cleanly, so the file holds every frame sent.
+/// A killed fragmented MP4 still plays up to its last finished fragment.
+fn wind_down(child: &mut Child) -> bool {
     let deadline = Instant::now() + CANCEL_GRACE;
     while Instant::now() < deadline {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
+            Ok(Some(status)) => return status.success(),
+            Err(_) => return false,
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
     let _ = child.kill();
     let _ = child.wait();
+    false
 }
 
 /// Wait for ffmpeg to finish encoding and turn its exit status into a
@@ -521,8 +559,15 @@ fn finish(
             break status;
         }
         if cancel.is_cancelled() {
-            wind_down(child);
-            return Err(MovieError::Cancelled { kept: None });
+            // The caller fills in the file and frame count.
+            let finished = wind_down(child);
+            return Err(MovieError::Cancelled {
+                kept: Some(Kept {
+                    path: PathBuf::new(),
+                    frames: 0,
+                    finished,
+                }),
+            });
         }
         std::thread::sleep(Duration::from_millis(50));
     };
