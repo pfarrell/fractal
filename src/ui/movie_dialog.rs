@@ -3,7 +3,9 @@
 use crate::engine::bookmark::{Bookmark, BookmarkView};
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
-use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie};
+use crate::engine::movie::{
+    CameraPath, MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie,
+};
 use crate::engine::render::CancelToken;
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use eframe::egui;
@@ -207,6 +209,8 @@ impl MovieDialog {
             max_iter: start.max_iter,
             color: start.color,
             output: PathBuf::from(&self.output),
+            path: CameraPath::Straight,
+            rotation: 0.0,
         }
     }
 
