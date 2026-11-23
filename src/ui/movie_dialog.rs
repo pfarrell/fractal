@@ -3,7 +3,7 @@
 use crate::engine::bookmark::{Bookmark, BookmarkView};
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
-use crate::engine::keyframe::Quality;
+use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{
     CameraPath, MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie,
 };
@@ -74,6 +74,64 @@ fn zoom_per_second(total_zoom: f64, seconds: f64) -> f64 {
     total_zoom.powf(1.0 / seconds)
 }
 
+/// The cost estimate as a sentence, relative to rendering every frame.
+fn cost_text(cost: f64) -> String {
+    if (0.9..=1.1).contains(&cost) {
+        "about the same as Exact".to_string()
+    } else if cost < 1.0 {
+        let speedup = 1.0 / cost;
+        if speedup >= 10.0 {
+            format!("≈ {speedup:.0}× faster than Exact")
+        } else {
+            format!("≈ {speedup:.1}× faster than Exact")
+        }
+    } else {
+        format!("≈ {cost:.1}× slower than Exact — few frames per keyframe")
+    }
+}
+
+/// What the planner makes of the current settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Estimate {
+    cost: f64,
+    /// Some frames use lower quality (or Exact) to fit in memory.
+    lowered: bool,
+}
+
+/// The spec fields the estimate depends on.
+#[derive(Clone, PartialEq)]
+struct EstimateKey {
+    kind: FractalKind,
+    start_center: Complex64,
+    start_span: f64,
+    max_iter: MaxIter,
+    target: Complex64,
+    end_span: f64,
+    fps: u32,
+    seconds: f64,
+    size: (usize, usize),
+    path: CameraPath,
+    rotation: f64,
+    quality: Quality,
+}
+
+fn compute_estimate(spec: &MovieSpec) -> Estimate {
+    let Some(q) = spec.quality.q() else {
+        return Estimate {
+            cost: 1.0,
+            lowered: false,
+        };
+    };
+    let lowered = plan(spec, q, KEYFRAME_MAX_PIXELS).iter().any(|b| match b {
+        Block::Keyframe(s) => s.q < q,
+        Block::Exact(_) => true,
+    });
+    Estimate {
+        cost: estimated_cost(spec),
+        lowered,
+    }
+}
+
 const RESOLUTIONS: [(usize, usize); 3] = [(1280, 720), (1920, 1080), (854, 480)];
 
 impl MovieStart {
@@ -114,6 +172,13 @@ pub struct MovieDialog {
     path: CameraPath,
     /// Degrees per second the picture turns.
     rotation: f64,
+    /// How frames are rendered: every one exactly, or from keyframes.
+    quality: Quality,
+    /// The last estimate, with the settings it was made for.
+    estimate: Option<(EstimateKey, Estimate)>,
+    /// How many times the planner has run (for tests).
+    #[cfg(test)]
+    estimate_runs: usize,
     width: usize,
     height: usize,
     output: String,
@@ -149,6 +214,10 @@ impl Default for MovieDialog {
             seconds: 20.0,
             path: CameraPath::Straight,
             rotation: 0.0,
+            quality: Quality::Smooth,
+            estimate: None,
+            #[cfg(test)]
+            estimate_runs: 0,
             width: 1280,
             height: 720,
             output: String::new(),
@@ -219,8 +288,40 @@ impl MovieDialog {
             output: PathBuf::from(&self.output),
             path: self.path,
             rotation: self.rotation,
-            quality: Quality::Exact,
+            quality: self.quality,
         }
+    }
+
+    /// Cost and memory fit of the current settings; the planner walks every
+    /// frame, so it only reruns when a setting changes.
+    fn estimate(&mut self, start: &MovieStart) -> Estimate {
+        let spec = self.spec(start);
+        let key = EstimateKey {
+            kind: spec.kind,
+            start_center: spec.start_center,
+            start_span: spec.start_span,
+            max_iter: spec.max_iter,
+            target: spec.target,
+            end_span: spec.end_span,
+            fps: spec.fps,
+            seconds: spec.seconds,
+            size: (spec.width, spec.height),
+            path: spec.path,
+            rotation: spec.rotation,
+            quality: spec.quality,
+        };
+        if let Some((k, e)) = &self.estimate
+            && *k == key
+        {
+            return *e;
+        }
+        #[cfg(test)]
+        {
+            self.estimate_runs += 1;
+        }
+        let e = compute_estimate(&spec);
+        self.estimate = Some((key, e));
+        e
     }
 
     fn launch(&mut self, spec: MovieSpec, ffmpeg: PathBuf, threads: usize, ctx: &egui::Context) {
@@ -320,7 +421,7 @@ impl MovieDialog {
                  start also sets the fractal, colors and iterations; the end only \
                  sets where to zoom to and how deep.",
             );
-            ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks));
+            ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks, &start));
             ui.separator();
             if self.ffmpeg.is_none() && !matches!(self.status, Status::Failed(_)) {
                 ui.colored_label(WARNING, MovieError::FfmpegMissing.to_string());
@@ -357,7 +458,7 @@ impl MovieDialog {
         }
     }
 
-    fn settings(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark]) {
+    fn settings(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark], start: &MovieStart) {
         egui::Grid::new("movie_settings")
             .num_columns(2)
             .show(ui, |ui| {
@@ -453,6 +554,26 @@ impl MovieDialog {
                 ui.label("Rotation");
                 ui.add(egui::Slider::new(&mut self.rotation, -30.0..=30.0).suffix(" °/s"));
                 ui.end_row();
+                ui.label("Quality");
+                egui::ComboBox::from_id_salt("movie_quality")
+                    .selected_text(self.quality.label())
+                    .show_ui(ui, |ui| {
+                        for q in Quality::ALL {
+                            ui.selectable_value(&mut self.quality, q, q.label());
+                        }
+                    });
+                ui.end_row();
+                if self.quality != Quality::Exact {
+                    let estimate = self.estimate(start);
+                    ui.label("");
+                    ui.vertical(|ui| {
+                        ui.small(cost_text(estimate.cost));
+                        if estimate.lowered {
+                            ui.small("some frames use Fast quality to fit in memory");
+                        }
+                    });
+                    ui.end_row();
+                }
                 ui.label("Resolution");
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("res")
@@ -580,6 +701,44 @@ mod tests {
                 scale: 0.1,
             },
         }
+    }
+
+    #[test]
+    fn quality_defaults_to_smooth_and_reaches_the_spec() {
+        let mut d = MovieDialog::default();
+        assert_eq!(d.spec(&current()).quality, Quality::Smooth);
+        d.quality = Quality::Exact;
+        assert_eq!(d.spec(&current()).quality, Quality::Exact);
+    }
+
+    #[test]
+    fn cost_reads_naturally() {
+        assert_eq!(cost_text(0.025), "≈ 40× faster than Exact");
+        assert_eq!(
+            cost_text(1.6),
+            "≈ 1.6× slower than Exact — few frames per keyframe"
+        );
+        assert_eq!(cost_text(1.0), "about the same as Exact");
+        assert_eq!(cost_text(0.5), "≈ 2.0× faster than Exact");
+    }
+
+    #[test]
+    fn estimate_is_cached_until_a_setting_changes() {
+        let mut d = MovieDialog {
+            seconds: 2.0,
+            fps: 24,
+            width: 64,
+            height: 48,
+            ..MovieDialog::default()
+        };
+        let start = current();
+        let a = d.estimate(&start);
+        assert_eq!(d.estimate_runs, 1);
+        assert_eq!(d.estimate(&start), a);
+        assert_eq!(d.estimate_runs, 1);
+        d.rotation = 10.0;
+        d.estimate(&start);
+        assert_eq!(d.estimate_runs, 2);
     }
 
     #[test]
