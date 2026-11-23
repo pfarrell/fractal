@@ -113,16 +113,21 @@ pub fn colorize(samples: &[Sample], s: &ColorSettings, out: &mut [[u8; 4]]) {
     debug_assert_eq!(samples.len(), out.len());
     let palette = Palette::get(s.palette);
     for (px, sample) in out.iter_mut().zip(samples) {
-        *px = match *sample {
-            Sample::Inside => [0, 0, 0, 255],
-            Sample::Escaped { smooth, .. } => rgba(palette.at(smooth * s.scale + s.offset)),
-            Sample::Converged { root, iter } => {
-                // Darker = took longer to converge; shows the basin structure.
-                let shade = 0.85f32.powi(iter.min(20) as i32).max(0.25);
-                let c = ROOT_COLORS[root as usize % ROOT_COLORS.len()];
-                rgba(c.map(|v| (v as f32 * shade) as u8))
-            }
-        };
+        *px = sample_color(*sample, s, &palette);
+    }
+}
+
+/// Color one escape-time sample.
+pub fn sample_color(sample: Sample, s: &ColorSettings, palette: &Palette) -> [u8; 4] {
+    match sample {
+        Sample::Inside => [0, 0, 0, 255],
+        Sample::Escaped { smooth, .. } => rgba(palette.at(smooth * s.scale + s.offset)),
+        Sample::Converged { root, iter } => {
+            // Darker = took longer to converge; shows the basin structure.
+            let shade = 0.85f32.powi(iter.min(20) as i32).max(0.25);
+            let c = ROOT_COLORS[root as usize % ROOT_COLORS.len()];
+            rgba(c.map(|v| (v as f32 * shade) as u8))
+        }
     }
 }
 
