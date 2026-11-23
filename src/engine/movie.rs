@@ -16,8 +16,8 @@
 //! center pans in a straight line instead.
 
 use crate::engine::color::{ColorSettings, colorize};
-use crate::engine::escape::FractalKind;
-use crate::engine::render::{CancelToken, F64Sampler, render};
+use crate::engine::escape::{FractalKind, Sample, iterate};
+use crate::engine::render::{CancelToken, Sampler, render};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,34 @@ impl CameraPath {
 pub const CIRCLE_PERIOD_S: f64 = 15.0;
 /// The circle's radius, as a fraction of the current view's span.
 pub const CIRCLE_RADIUS: f64 = 0.15;
+
+/// The point at pixel position (`x`, `y`) of `view` turned by `angle`
+/// radians (counterclockwise) about the view's center.
+pub fn rotated_point(view: &Viewport, angle: f64, x: f64, y: f64) -> Complex64 {
+    if angle == 0.0 {
+        return view.pixel_to_complex(x, y);
+    }
+    let s = view.pixel_scale();
+    let dx = (x - view.width as f64 / 2.0) * s;
+    let dy = -(y - view.height as f64 / 2.0) * s;
+    let (sin, cos) = angle.sin_cos();
+    view.center + Complex64::new(dx * cos - dy * sin, dx * sin + dy * cos)
+}
+
+/// One `iterate` per pixel, with the picture turned by `angle` radians.
+#[derive(Clone, Copy, Debug)]
+pub struct RotatedSampler {
+    pub kind: FractalKind,
+    pub max_iter: u32,
+    pub angle: f64,
+}
+
+impl Sampler for RotatedSampler {
+    fn sample(&self, view: &Viewport, x: usize, y: usize) -> Sample {
+        let point = rotated_point(view, self.angle, x as f64 + 0.5, y as f64 + 0.5);
+        iterate(&self.kind, point, self.max_iter)
+    }
+}
 
 fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -211,6 +239,9 @@ impl MovieSpec {
         if !(self.seconds.is_finite() && self.seconds > 0.0) {
             return bad("duration must be positive");
         }
+        if !self.rotation.is_finite() {
+            return bad("rotation must be a number");
+        }
         let spans_ok = [self.start_span, self.end_span]
             .iter()
             .all(|s| s.is_finite() && *s > 0.0);
@@ -263,6 +294,12 @@ impl MovieSpec {
         };
         let center = center + self.drift(t * self.seconds) * span;
         Viewport::new(center, span, self.width, self.height)
+    }
+
+    /// How far frame `i` is turned, in radians.
+    pub fn frame_angle(&self, i: usize) -> f64 {
+        let t = i as f64 / (self.frame_count() - 1) as f64;
+        self.rotation.to_radians() * t * self.seconds
     }
 
     /// The camera path's offset from the straight zoom at `time` seconds,
@@ -435,9 +472,10 @@ fn render_frames(
         }
         let start = Instant::now();
         let view = spec.frame_view(i);
-        let sampler = F64Sampler {
+        let sampler = RotatedSampler {
             kind: spec.kind,
             max_iter: spec.max_iter.resolve(view.magnification()),
+            angle: spec.frame_angle(i),
         };
         let samples =
             render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled { kept: None })?;

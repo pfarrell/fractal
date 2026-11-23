@@ -1,11 +1,11 @@
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::movie::{
-    CIRCLE_PERIOD_S, CIRCLE_RADIUS, CameraPath, MovieError, MovieProgress, MovieSpec, ffmpeg_args,
-    ffmpeg_install_hint, find_program, render_movie,
+    CIRCLE_PERIOD_S, CIRCLE_RADIUS, CameraPath, MovieError, MovieProgress, MovieSpec,
+    RotatedSampler, ffmpeg_args, ffmpeg_install_hint, find_program, render_movie, rotated_point,
 };
-use fractal_explorer::engine::render::CancelToken;
-use fractal_explorer::engine::viewport::MaxIter;
+use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
+use fractal_explorer::engine::viewport::{MaxIter, Viewport};
 use num_complex::Complex64;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -133,6 +133,53 @@ fn circle_period_is_fifteen_seconds() {
             (turned - want).abs() < 1e-6,
             "frame {j}: {turned} vs {want}"
         );
+    }
+}
+
+#[test]
+fn quarter_turn_moves_right_of_center_to_above() {
+    let v = Viewport::new(Complex64::new(1.0, 2.0), 2.0, 100, 100);
+    // Half-way to the right edge, on the middle row.
+    let p = rotated_point(&v, std::f64::consts::FRAC_PI_2, 75.0, 50.0);
+    assert!((p - Complex64::new(1.0, 2.5)).norm() < 1e-12, "{p}");
+}
+
+#[test]
+fn zero_rotation_matches_plain_sampler() {
+    let v = Viewport::new(Complex64::new(-0.743643887, 0.131825904), 3e-6, 37, 23);
+    let kind = FractalKind::Mandelbrot;
+    let plain = F64Sampler {
+        kind,
+        max_iter: 2000,
+    };
+    let turned = RotatedSampler {
+        kind,
+        max_iter: 2000,
+        angle: 0.0,
+    };
+    for y in 0..v.height {
+        for x in 0..v.width {
+            assert_eq!(turned.sample(&v, x, y), plain.sample(&v, x, y), "({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn frame_angle_is_rate_times_time() {
+    let mut sp = s();
+    sp.rotation = 6.0;
+    assert_eq!(sp.frame_angle(0), 0.0);
+    let last = sp.frame_angle(sp.frame_count() - 1);
+    assert!((last - 60f64.to_radians()).abs() < 1e-12, "{last}");
+}
+
+#[test]
+fn validate_rejects_non_finite_rotation() {
+    let dir = tempfile::tempdir().unwrap();
+    for r in [f64::NAN, f64::INFINITY] {
+        let mut sp = spec(dir.path().join("o.mp4"));
+        sp.rotation = r;
+        assert!(matches!(sp.validate(), Err(MovieError::Invalid(_))), "{r}");
     }
 }
 
