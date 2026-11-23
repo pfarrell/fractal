@@ -1,8 +1,9 @@
 use fractal_explorer::engine::color::{ColorSettings, Palette, colorize};
 use fractal_explorer::engine::escape::{FractalKind, Sample};
 use fractal_explorer::engine::keyframe::{
-    Block, KEYFRAME_MAX_PIXELS, Keyframe, Quality, Stretch, estimated_cost, linear_to_srgb, pack,
-    plan, render_keyframe, resample, srgb_to_linear, tap_color,
+    Block, KEYFRAME_MAX_PIXELS, Keyframe, Quality, Stretch, TAP_COST, estimated_cost, frame_work,
+    keyframe_work, linear_to_srgb, pack, plan, planned_work, render_keyframe, resample,
+    srgb_to_linear, tap_color,
 };
 use fractal_explorer::engine::movie::{CameraPath, MovieSpec, RotatedSampler};
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, render};
@@ -261,9 +262,11 @@ fn hd(seconds: f64, fps: u32) -> MovieSpec {
 
 #[test]
 fn cost_is_low_for_slow_zooms_and_high_for_fast() {
+    // Resampling alone is ~0.15 of Exact (about 12 taps a pixel), so even
+    // a slow zoom is only several times faster.
     let slow = hd(600.0, 60);
     let cost = estimated_cost(&slow);
-    assert!(cost < 0.1, "slow zoom costs {cost}");
+    assert!(cost < 0.25, "slow zoom costs {cost}");
 
     let fast = hd(3.0, 30);
     let cost = estimated_cost(&fast);
@@ -274,6 +277,35 @@ fn cost_is_low_for_slow_zooms_and_high_for_fast() {
         ..hd(3.0, 30)
     };
     assert_eq!(estimated_cost(&exact), 1.0);
+}
+
+#[test]
+fn cost_counts_resampling() {
+    // However many frames share a keyframe, each still costs its taps: a
+    // Smooth frame takes at least 2×2 per pixel.
+    for sp in [hd(600.0, 60), hd(3600.0, 120)] {
+        let cost = estimated_cost(&sp);
+        assert!(cost >= 4.0 * TAP_COST, "{} s costs {cost}", sp.seconds);
+    }
+}
+
+#[test]
+fn planned_work_adds_up_to_the_estimate() {
+    for (name, sp) in specs(Quality::Smooth) {
+        let blocks = plan(&sp, 2, KEYFRAME_MAX_PIXELS);
+        let frames: f64 = blocks
+            .iter()
+            .flat_map(|b| range(b).map(|i| frame_work(&sp, b, i)).collect::<Vec<_>>())
+            .sum();
+        let keyframes: f64 = stretches(&blocks).map(keyframe_work).sum();
+        let total = planned_work(&sp, &blocks);
+        assert!((frames + keyframes - total).abs() <= 1e-9 * total, "{name}");
+        let exact = (sp.width * sp.height * sp.frame_count()) as f64;
+        assert!(
+            (total / exact - estimated_cost(&sp)).abs() < 1e-12,
+            "{name}"
+        );
+    }
 }
 
 #[test]

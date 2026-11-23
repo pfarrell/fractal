@@ -174,21 +174,64 @@ pub fn plan(spec: &MovieSpec, q: u32, max_pixels: usize) -> Vec<Block> {
     blocks
 }
 
-/// Samples rendered for `spec`, relative to Exact: keyframe samples plus
-/// the pixels of frames rendered Exact, over every frame's pixels.
+/// One resampling tap's cost, in Exact samples. Measured on 1080p Smooth
+/// zooms into seahorse valley (release, 12 threads): a tap takes 2.8–3.2
+/// ns of wall time at any depth; an Exact sample 160–290 ns down to 1e7
+/// and ~1 200 ns past it, as more of the view escapes slowly. 3.0 ns over
+/// a moderate-depth 230 ns. Deep down that overstates resampling, but
+/// there keyframes dominate the cost.
+pub const TAP_COST: f64 = 0.013;
+
+/// Work, in Exact samples, of rendering stretch `s`'s keyframe.
+pub fn keyframe_work(s: &Stretch) -> f64 {
+    (s.view.width * s.view.height) as f64
+}
+
+/// Work, in Exact samples, of making frame `i` of `block` once any
+/// keyframe is rendered.
+pub fn frame_work(spec: &MovieSpec, block: &Block, i: usize) -> f64 {
+    match block {
+        Block::Exact(_) => (spec.width * spec.height) as f64,
+        Block::Keyframe(s) => {
+            let n = taps_per_axis(&spec.frame_view(i), &s.view);
+            (n * n * spec.width * spec.height) as f64 * TAP_COST
+        }
+    }
+}
+
+/// Taps per axis when resampling `frame` from keyframe view `k`: frame
+/// pixel / keyframe pixel, rounded up.
+fn taps_per_axis(frame: &Viewport, k: &Viewport) -> usize {
+    // Ratios a hair over a whole number are float noise, not another tap.
+    ((frame.pixel_scale() / k.pixel_scale() - 1e-9).ceil() as usize).max(1)
+}
+
+/// Work, in Exact samples, of every block: keyframes and frames.
+pub fn planned_work(spec: &MovieSpec, blocks: &[Block]) -> f64 {
+    blocks
+        .iter()
+        .map(|b| {
+            let frames = match b {
+                Block::Keyframe(s) => s.frames.clone(),
+                Block::Exact(r) => r.clone(),
+            };
+            let kf = match b {
+                Block::Keyframe(s) => keyframe_work(s),
+                Block::Exact(_) => 0.0,
+            };
+            kf + frames.map(|i| frame_work(spec, b, i)).sum::<f64>()
+        })
+        .sum()
+}
+
+/// Planned work for `spec` relative to Exact's: keyframe samples, taps
+/// and frames rendered Exact, over every frame's pixels.
 pub fn estimated_cost(spec: &MovieSpec) -> f64 {
     let Some(q) = spec.quality.q() else {
         return 1.0;
     };
-    let frame = (spec.width * spec.height) as f64;
-    let samples: f64 = plan(spec, q, KEYFRAME_MAX_PIXELS)
-        .iter()
-        .map(|b| match b {
-            Block::Keyframe(s) => (s.view.width * s.view.height) as f64,
-            Block::Exact(r) => r.len() as f64 * frame,
-        })
-        .sum();
-    samples / (frame * spec.frame_count() as f64)
+    let exact = (spec.width * spec.height * spec.frame_count()) as f64;
+    planned_work(spec, &plan(spec, q, KEYFRAME_MAX_PIXELS)) / exact
 }
 
 const TAG_SHIFT: u32 = 30;
@@ -531,8 +574,7 @@ pub fn resample(
     let k = &kf.view;
     let (kw, max_x, max_y) = (k.width, k.width - 1, k.height - 1);
     let data = &kf.data[..];
-    // Ratios a hair over a whole number are float noise, not another tap.
-    let n = ((frame.pixel_scale() / k.pixel_scale() - 1e-9).ceil() as usize).max(1);
+    let n = taps_per_axis(frame, k);
     let taps = (n * n) as f32;
     let m = PixelMap::new(frame, angle, k);
     // Keyframe coordinates in 32.32 fixed point: a pixel's corner is
