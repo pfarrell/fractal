@@ -529,16 +529,22 @@ fn cancel_keeps_the_frames_rendered_so_far() {
 #[test]
 fn cancel_where_the_encoder_fails_to_finish_says_so() {
     // A stand-in encoder that writes its output file, reads every frame,
-    // and then fails instead of closing the movie properly.
-    use std::os::unix::fs::PermissionsExt;
+    // and then fails instead of closing the movie properly. A separate
+    // shell writes it: a file this process held open for writing could be
+    // inherited by a process another test spawns meanwhile, and running it
+    // would then fail with "Text file busy".
     let dir = tempfile::tempdir().unwrap();
     let enc = dir.path().join("bad-encoder");
-    std::fs::write(
-        &enc,
-        "#!/bin/sh\nfor a; do out=$a; done\ncat > \"$out\"\nexit 1\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let made = std::process::Command::new("sh")
+        .args([
+            "-c",
+            r#"printf '#!/bin/sh\nfor a; do out=$a; done\ncat > "$out"\nexit 1\n' > "$1" && chmod 755 "$1""#,
+            "sh",
+        ])
+        .arg(&enc)
+        .status()
+        .unwrap();
+    assert!(made.success());
     let out = dir.path().join("c.mp4");
     let generation = Arc::new(AtomicU64::new(0));
     let token = CancelToken::new(generation.clone(), 0);
