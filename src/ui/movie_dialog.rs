@@ -32,7 +32,9 @@ enum Status {
     Rendering {
         done: usize,
         total: usize,
-        total_ms: u64,
+        /// Planned work done and in all (see `MovieProgress::Frame`).
+        work: (f64, f64),
+        elapsed_ms: u64,
         /// Set while a keyframe renders: (index from 0, count).
         keyframe: Option<(usize, usize)>,
     },
@@ -72,6 +74,12 @@ fn format_duration(seconds: f64) -> String {
 /// How fast a zoom of `total_zoom` over `seconds` feels.
 fn zoom_per_second(total_zoom: f64, seconds: f64) -> f64 {
     total_zoom.powf(1.0 / seconds)
+}
+
+/// Seconds left of a render `elapsed` seconds in with `done` of `total`
+/// planned work finished, assuming the rest goes at the same rate.
+fn seconds_left(elapsed: f64, done: f64, total: f64) -> Option<f64> {
+    (done > 0.0).then(|| (elapsed * (total - done) / done).max(0.0))
 }
 
 /// The cost estimate as a sentence, relative to rendering every frame.
@@ -344,7 +352,8 @@ impl MovieDialog {
         self.status = Status::Rendering {
             done: 0,
             total: 0,
-            total_ms: 0,
+            work: (0.0, 0.0),
+            elapsed_ms: 0,
             keyframe: None,
         };
     }
@@ -357,16 +366,14 @@ impl MovieDialog {
                 Msg::Progress(MovieProgress::Frame {
                     done,
                     total,
-                    last_frame_ms,
+                    work,
+                    elapsed_ms,
                 }) => {
-                    let prev = match self.status {
-                        Status::Rendering { total_ms, .. } => total_ms,
-                        _ => 0,
-                    };
                     self.status = Status::Rendering {
                         done,
                         total,
-                        total_ms: prev + last_frame_ms,
+                        work,
+                        elapsed_ms,
                         keyframe: None,
                     };
                 }
@@ -641,7 +648,8 @@ impl MovieDialog {
             Status::Rendering {
                 done,
                 total,
-                total_ms,
+                work: (work_done, work_total),
+                elapsed_ms,
                 keyframe,
             } => {
                 let frac = if *total > 0 {
@@ -649,11 +657,9 @@ impl MovieDialog {
                 } else {
                     0.0
                 };
-                let eta = if *done > 0 {
-                    let secs = *total_ms as f64 / *done as f64 * (*total - *done) as f64 / 1000.0;
-                    format!(" · about {secs:.0} s left")
-                } else {
-                    String::new()
+                let eta = match seconds_left(*elapsed_ms as f64 / 1000.0, *work_done, *work_total) {
+                    Some(secs) => format!(" · about {} left", format_duration(secs)),
+                    None => String::new(),
                 };
                 ui.add(egui::ProgressBar::new(frac).text(format!("frame {done}/{total}{eta}")));
                 if let Some((k, of)) = keyframe {
@@ -724,6 +730,17 @@ mod tests {
         // 1 / 0.1003 ≈ 9.97 rounds to 10: no "10.0×".
         assert_eq!(cost_text(0.1003), "≈ 10× faster than Exact");
         assert_eq!(cost_text(0.1007), "≈ 9.9× faster than Exact");
+    }
+
+    #[test]
+    fn eta_scales_elapsed_time_by_the_work_left() {
+        assert_eq!(seconds_left(5.0, 0.0, 100.0), None);
+        assert_eq!(seconds_left(10.0, 25.0, 100.0), Some(30.0));
+        assert_eq!(seconds_left(10.0, 100.0, 100.0), Some(0.0));
+        // A keyframe of 1000 samples' work then one frame of 10: 20 s in,
+        // the 99 frames left are about as much work again, not 99 × 20 s.
+        let left = seconds_left(20.0, 1010.0, 1000.0 + 100.0 * 10.0).unwrap();
+        assert!((left - 19.6).abs() < 0.1, "{left}");
     }
 
     #[test]

@@ -23,7 +23,8 @@
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate};
 use crate::engine::keyframe::{
-    Block, KEYFRAME_MAX_PIXELS, Quality, plan, render_keyframe, resample,
+    Block, KEYFRAME_MAX_PIXELS, Quality, frame_work, keyframe_work, plan, planned_work,
+    render_keyframe, resample,
 };
 use crate::engine::render::{CancelToken, Sampler, render};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
@@ -119,10 +120,14 @@ pub struct MovieSpec {
 }
 
 pub enum MovieProgress {
+    /// `done` frames of `total` are out. `work` is (done, planned) in
+    /// Exact samples (see [`planned_work`]), keyframes included, and
+    /// `elapsed_ms` the render time so far: together, an ETA.
     Frame {
         done: usize,
         total: usize,
-        last_frame_ms: u64,
+        work: (f64, f64),
+        elapsed_ms: u64,
     },
     /// A keyframe is about to render: `done` keyframes are finished of
     /// `total`.
@@ -544,12 +549,14 @@ fn render_frames(
     let total = spec.frame_count();
     let cancelled = || MovieError::Cancelled { kept: None };
     let mut pixels = vec![[0u8; 4]; spec.width * spec.height];
+    let started = Instant::now();
+    let elapsed_ms = || started.elapsed().as_millis() as u64;
     let Some(q) = spec.quality.q() else {
+        let px = (spec.width * spec.height) as f64;
         for i in 0..total {
             if cancel.is_cancelled() {
                 return Err(cancelled());
             }
-            let start = Instant::now();
             render_exact_frame(spec, i, pool, cancel, &mut pixels)?;
             if tx.send(pixels.as_flattened().to_vec()).is_err() {
                 // The writer stopped: ffmpeg exited early. `finish` reports why.
@@ -559,7 +566,8 @@ fn render_frames(
             progress(MovieProgress::Frame {
                 done: i + 1,
                 total,
-                last_frame_ms: start.elapsed().as_millis() as u64,
+                work: ((i + 1) as f64 * px, total as f64 * px),
+                elapsed_ms: elapsed_ms(),
             });
         }
         return Ok(());
@@ -571,9 +579,8 @@ fn render_frames(
         .filter(|b| matches!(b, Block::Keyframe(_)))
         .count();
     let mut keyframes_done = 0;
-    // Time since the previous frame was sent, so keyframe renders count
-    // toward the ETA.
-    let mut last_sent = Instant::now();
+    let work_total = planned_work(spec, &blocks);
+    let mut work_done = 0.0;
     for block in &blocks {
         let (frames, keyframe) = match block {
             Block::Exact(frames) => (frames.clone(), None),
@@ -587,6 +594,7 @@ fn render_frames(
                 });
                 keyframes_done += 1;
                 let kf = render_keyframe(spec.kind, stretch, pool, cancel).ok_or_else(cancelled)?;
+                work_done += keyframe_work(stretch);
                 (stretch.frames.clone(), Some(kf))
             }
         };
@@ -614,12 +622,13 @@ fn render_frames(
                 return Ok(());
             }
             *sent += 1;
+            work_done += frame_work(spec, block, i);
             progress(MovieProgress::Frame {
                 done: i + 1,
                 total,
-                last_frame_ms: last_sent.elapsed().as_millis() as u64,
+                work: (work_done, work_total),
+                elapsed_ms: elapsed_ms(),
             });
-            last_sent = Instant::now();
         }
     }
     Ok(())
