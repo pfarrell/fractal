@@ -108,6 +108,9 @@ pub struct MovieDialog {
     end_magnification: f64,
     fps: u32,
     seconds: f64,
+    path: CameraPath,
+    /// Degrees per second the picture turns.
+    rotation: f64,
     width: usize,
     height: usize,
     output: String,
@@ -141,6 +144,8 @@ impl Default for MovieDialog {
             end_magnification: 1e10,
             fps: 30,
             seconds: 20.0,
+            path: CameraPath::Straight,
+            rotation: 0.0,
             width: 1280,
             height: 720,
             output: String::new(),
@@ -209,8 +214,8 @@ impl MovieDialog {
             max_iter: start.max_iter,
             color: start.color,
             output: PathBuf::from(&self.output),
-            path: CameraPath::Straight,
-            rotation: 0.0,
+            path: self.path,
+            rotation: self.rotation,
         }
     }
 
@@ -419,6 +424,23 @@ impl MovieDialog {
                 ui.label("");
                 ui.small(self.pace_text());
                 ui.end_row();
+                ui.label("Path");
+                egui::ComboBox::from_id_salt("movie_path")
+                    .selected_text(self.path.label())
+                    .show_ui(ui, |ui| {
+                        for p in CameraPath::ALL {
+                            ui.selectable_value(&mut self.path, p, p.label());
+                        }
+                    });
+                ui.end_row();
+                if self.path == CameraPath::Circle {
+                    ui.label("");
+                    ui.small("the target circles the screen every 15 s");
+                    ui.end_row();
+                }
+                ui.label("Rotation");
+                ui.add(egui::Slider::new(&mut self.rotation, -30.0..=30.0).suffix(" °/s"));
+                ui.end_row();
                 ui.label("Resolution");
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("res")
@@ -542,6 +564,17 @@ mod tests {
                 scale: 0.1,
             },
         }
+    }
+
+    #[test]
+    fn path_and_rotation_reach_the_spec() {
+        let mut d = MovieDialog::default();
+        let sp = d.spec(&current());
+        assert_eq!((sp.path, sp.rotation), (CameraPath::Straight, 0.0));
+        d.path = CameraPath::Circle;
+        d.rotation = -6.0;
+        let sp = d.spec(&current());
+        assert_eq!((sp.path, sp.rotation), (CameraPath::Circle, -6.0));
     }
 
     #[test]
