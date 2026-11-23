@@ -22,7 +22,9 @@
 
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate};
-use crate::engine::keyframe::Quality;
+use crate::engine::keyframe::{
+    Block, KEYFRAME_MAX_PIXELS, Quality, plan, render_keyframe, resample,
+};
 use crate::engine::render::{CancelToken, Sampler, render};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
@@ -121,6 +123,12 @@ pub enum MovieProgress {
         done: usize,
         total: usize,
         last_frame_ms: u64,
+    },
+    /// A keyframe is about to render: `done` keyframes are finished of
+    /// `total`.
+    Keyframe {
+        done: usize,
+        total: usize,
     },
     Encoding,
     Done(PathBuf),
@@ -503,6 +511,27 @@ pub fn render_movie(
     }
 }
 
+/// Render frame `i` the exact way: one `iterate` per pixel. `out` is
+/// `width × height`.
+pub fn render_exact_frame(
+    spec: &MovieSpec,
+    i: usize,
+    pool: &rayon::ThreadPool,
+    cancel: &CancelToken,
+    out: &mut [[u8; 4]],
+) -> Result<(), MovieError> {
+    let view = spec.frame_view(i);
+    let sampler = RotatedSampler {
+        kind: spec.kind,
+        max_iter: spec.max_iter.resolve(view.magnification()),
+        angle: spec.frame_angle(i),
+    };
+    let samples =
+        render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled { kept: None })?;
+    colorize(&samples, &spec.color, out);
+    Ok(())
+}
+
 /// Render every frame and hand it to the writer thread.
 fn render_frames(
     spec: &MovieSpec,
@@ -513,31 +542,85 @@ fn render_frames(
     progress: &mut dyn FnMut(MovieProgress),
 ) -> Result<(), MovieError> {
     let total = spec.frame_count();
+    let cancelled = || MovieError::Cancelled { kept: None };
     let mut pixels = vec![[0u8; 4]; spec.width * spec.height];
-    for i in 0..total {
-        if cancel.is_cancelled() {
-            return Err(MovieError::Cancelled { kept: None });
+    let Some(q) = spec.quality.q() else {
+        for i in 0..total {
+            if cancel.is_cancelled() {
+                return Err(cancelled());
+            }
+            let start = Instant::now();
+            render_exact_frame(spec, i, pool, cancel, &mut pixels)?;
+            if tx.send(pixels.as_flattened().to_vec()).is_err() {
+                // The writer stopped: ffmpeg exited early. `finish` reports why.
+                return Ok(());
+            }
+            *sent += 1;
+            progress(MovieProgress::Frame {
+                done: i + 1,
+                total,
+                last_frame_ms: start.elapsed().as_millis() as u64,
+            });
         }
-        let start = Instant::now();
-        let view = spec.frame_view(i);
-        let sampler = RotatedSampler {
-            kind: spec.kind,
-            max_iter: spec.max_iter.resolve(view.magnification()),
-            angle: spec.frame_angle(i),
+        return Ok(());
+    };
+
+    let blocks = plan(spec, q, KEYFRAME_MAX_PIXELS);
+    let keyframes = blocks
+        .iter()
+        .filter(|b| matches!(b, Block::Keyframe(_)))
+        .count();
+    let mut keyframes_done = 0;
+    // Time since the previous frame was sent, so keyframe renders count
+    // toward the ETA.
+    let mut last_sent = Instant::now();
+    for block in &blocks {
+        let (frames, keyframe) = match block {
+            Block::Exact(frames) => (frames.clone(), None),
+            Block::Keyframe(stretch) => {
+                if cancel.is_cancelled() {
+                    return Err(cancelled());
+                }
+                progress(MovieProgress::Keyframe {
+                    done: keyframes_done,
+                    total: keyframes,
+                });
+                keyframes_done += 1;
+                let kf = render_keyframe(spec.kind, stretch, pool, cancel).ok_or_else(cancelled)?;
+                (stretch.frames.clone(), Some(kf))
+            }
         };
-        let samples =
-            render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled { kept: None })?;
-        colorize(&samples, &spec.color, &mut pixels);
-        if tx.send(pixels.as_flattened().to_vec()).is_err() {
-            // The writer stopped: ffmpeg exited early. `finish` reports why.
-            return Ok(());
+        for i in frames {
+            if cancel.is_cancelled() {
+                return Err(cancelled());
+            }
+            match &keyframe {
+                None => render_exact_frame(spec, i, pool, cancel, &mut pixels)?,
+                Some(kf) => {
+                    let view = spec.frame_view(i);
+                    let max_iter = spec.max_iter.resolve(view.magnification());
+                    resample(
+                        kf,
+                        &view,
+                        spec.frame_angle(i),
+                        max_iter,
+                        &spec.color,
+                        pool,
+                        &mut pixels,
+                    );
+                }
+            }
+            if tx.send(pixels.as_flattened().to_vec()).is_err() {
+                return Ok(());
+            }
+            *sent += 1;
+            progress(MovieProgress::Frame {
+                done: i + 1,
+                total,
+                last_frame_ms: last_sent.elapsed().as_millis() as u64,
+            });
+            last_sent = Instant::now();
         }
-        *sent += 1;
-        progress(MovieProgress::Frame {
-            done: i + 1,
-            total,
-            last_frame_ms: start.elapsed().as_millis() as u64,
-        });
     }
     Ok(())
 }

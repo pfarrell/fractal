@@ -33,6 +33,8 @@ enum Status {
         done: usize,
         total: usize,
         total_ms: u64,
+        /// Set while a keyframe renders: (index from 0, count).
+        keyframe: Option<(usize, usize)>,
     },
     Encoding,
     Done(PathBuf),
@@ -241,6 +243,7 @@ impl MovieDialog {
             done: 0,
             total: 0,
             total_ms: 0,
+            keyframe: None,
         };
     }
 
@@ -262,7 +265,13 @@ impl MovieDialog {
                         done,
                         total,
                         total_ms: prev + last_frame_ms,
+                        keyframe: None,
                     };
+                }
+                Msg::Progress(MovieProgress::Keyframe { done, total: k }) => {
+                    if let Status::Rendering { keyframe, .. } = &mut self.status {
+                        *keyframe = Some((done, k));
+                    }
                 }
                 Msg::Progress(MovieProgress::Encoding) => self.status = Status::Encoding,
                 Msg::Progress(MovieProgress::Done(_)) => {}
@@ -511,6 +520,7 @@ impl MovieDialog {
                 done,
                 total,
                 total_ms,
+                keyframe,
             } => {
                 let frac = if *total > 0 {
                     *done as f32 / *total as f32
@@ -524,6 +534,9 @@ impl MovieDialog {
                     String::new()
                 };
                 ui.add(egui::ProgressBar::new(frac).text(format!("frame {done}/{total}{eta}")));
+                if let Some((k, of)) = keyframe {
+                    ui.label(format!("rendering keyframe {}/{of}", k + 1));
+                }
             }
             Status::Encoding => {
                 ui.add(egui::ProgressBar::new(1.0).text("finishing encoding…"));

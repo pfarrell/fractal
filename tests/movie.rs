@@ -1,9 +1,11 @@
 use fractal_explorer::engine::color::ColorSettings;
+use fractal_explorer::engine::color::colorize;
 use fractal_explorer::engine::escape::FractalKind;
-use fractal_explorer::engine::keyframe::Quality;
+use fractal_explorer::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, plan};
 use fractal_explorer::engine::movie::{
     CIRCLE_PERIOD_S, CIRCLE_RADIUS, CameraPath, Kept, MovieError, MovieProgress, MovieSpec,
-    RotatedSampler, ffmpeg_args, ffmpeg_install_hint, find_program, render_movie, rotated_point,
+    RotatedSampler, ffmpeg_args, ffmpeg_install_hint, find_program, render_exact_frame,
+    render_movie, rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
 use fractal_explorer::engine::viewport::{MaxIter, Viewport};
@@ -685,4 +687,123 @@ fn missing_ffmpeg_message_says_how_to_fix_it() {
     assert!(msg.contains("ffmpeg not found"), "{msg}");
     assert!(msg.contains(ffmpeg_install_hint()), "{msg}");
     assert!(ffmpeg_install_hint().contains("install ffmpeg"));
+}
+
+/// 64×48, 2 s at 30 fps, circling and turning.
+fn keyframe_spec(out: PathBuf, quality: Quality) -> MovieSpec {
+    let mut sp = spec(out);
+    sp.seconds = 2.0;
+    sp.path = CameraPath::Circle;
+    sp.rotation = 10.0;
+    sp.quality = quality;
+    sp
+}
+
+#[test]
+fn fast_and_smooth_movies_decode_every_frame() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for q in [Quality::Fast, Quality::Smooth] {
+        let out = dir.path().join(format!("{q:?}.mp4"));
+        let sp = keyframe_spec(out.clone(), q);
+        let r = render_movie(
+            &sp,
+            2,
+            Path::new("ffmpeg"),
+            &CancelToken::never(),
+            &mut |_| {},
+        );
+        assert_eq!(r.unwrap(), out);
+        if let Some(n) = decodable_frames(&out) {
+            assert_eq!(n, 60, "{q:?}");
+        }
+    }
+}
+
+#[test]
+fn keyframe_progress_is_reported() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let sp = keyframe_spec(dir.path().join("k.mp4"), Quality::Smooth);
+    let blocks = plan(&sp, 2, KEYFRAME_MAX_PIXELS);
+    let total = blocks
+        .iter()
+        .filter(|b| matches!(b, Block::Keyframe(_)))
+        .count();
+    assert!(total > 1, "want several keyframes: {total}");
+    let (mut seen, mut frames) = (Vec::new(), 0);
+    render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        &CancelToken::never(),
+        &mut |p| match p {
+            MovieProgress::Keyframe { done, total } => seen.push((done, total)),
+            MovieProgress::Frame { .. } => frames += 1,
+            _ => {}
+        },
+    )
+    .unwrap();
+    let want: Vec<_> = (0..total).map(|d| (d, total)).collect();
+    assert_eq!(seen, want);
+    assert_eq!(frames, 60);
+}
+
+#[test]
+fn cancel_during_keyframe_is_prompt() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut sp = keyframe_spec(dir.path().join("p.mp4"), Quality::Smooth);
+    // Big frames make the first keyframe take seconds uncancelled.
+    sp.width = 1920;
+    sp.height = 1080;
+    let generation = Arc::new(AtomicU64::new(0));
+    let token = CancelToken::new(generation.clone(), 0);
+    let mut cancelled_at = None;
+    let r = render_movie(&sp, 2, Path::new("ffmpeg"), &token, &mut |p| {
+        if let MovieProgress::Keyframe { .. } = p
+            && cancelled_at.is_none()
+        {
+            generation.fetch_add(1, Ordering::Relaxed);
+            cancelled_at = Some(std::time::Instant::now());
+        }
+    });
+    let waited = cancelled_at.expect("a keyframe started").elapsed();
+    assert!(
+        matches!(r, Err(MovieError::Cancelled { kept: None })),
+        "{r:?}"
+    );
+    assert!(waited < std::time::Duration::from_secs(1), "{waited:?}");
+}
+
+#[test]
+fn exact_quality_is_unchanged() {
+    let sp = keyframe_spec(PathBuf::from("/tmp/unused.mp4"), Quality::Exact);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    let n = sp.width * sp.height;
+    for i in (0..sp.frame_count()).step_by(7) {
+        let view = sp.frame_view(i);
+        let sampler = RotatedSampler {
+            kind: sp.kind,
+            max_iter: sp.max_iter.resolve(view.magnification()),
+            angle: sp.frame_angle(i),
+        };
+        let samples =
+            fractal_explorer::engine::render::render(&sampler, &view, &pool, &CancelToken::never())
+                .unwrap();
+        let mut want = vec![[0u8; 4]; n];
+        colorize(&samples, &sp.color, &mut want);
+        let mut got = vec![[1u8; 4]; n];
+        render_exact_frame(&sp, i, &pool, &CancelToken::never(), &mut got).unwrap();
+        assert!(got == want, "frame {i}");
+    }
 }
