@@ -241,6 +241,18 @@ pub fn ffmpeg_args(fps: u32, width: usize, height: usize, output: &Path) -> Vec<
     for a in ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"] {
         args.push(a.into());
     }
+    // A plain MP4 keeps its index at the end, so nothing plays until the
+    // encode finishes and a crash loses everything. Fragmented MP4 writes
+    // the index up front and a fragment per keyframe: the file plays while
+    // it renders and survives being cut short. (Matroska does this anyway.)
+    let ext = output
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(ext.as_deref(), Some("mp4" | "mov")) {
+        args.push("-movflags".into());
+        args.push("+frag_keyframe+empty_moov+default_base_moof".into());
+    }
     args.push(output.as_os_str().to_owned());
     args
 }

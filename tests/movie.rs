@@ -154,12 +154,23 @@ fn ffmpeg_args_exact() {
         "yuv420p",
         "-crf",
         "18",
+        "-movflags",
+        "+frag_keyframe+empty_moov+default_base_moof",
         "/tmp/o.mp4",
     ]
     .iter()
     .map(OsString::from)
     .collect();
     assert_eq!(got, want);
+}
+
+#[test]
+fn mkv_gets_no_mp4_flags() {
+    let got = ffmpeg_args(30, 64, 48, Path::new("/tmp/o.mkv"));
+    assert!(!got.iter().any(|a| a == "-movflags"), "{got:?}");
+    assert_eq!(got.last().unwrap(), "/tmp/o.mkv");
+    let mov = ffmpeg_args(30, 64, 48, Path::new("/tmp/O.MOV"));
+    assert!(mov.iter().any(|a| a == "-movflags"), "{mov:?}");
 }
 
 #[test]
@@ -300,6 +311,65 @@ fn tiny_movie_end_to_end() {
     if let Ok(probe) = probe {
         assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "64,48,12");
     }
+}
+
+/// Frames ffprobe can decode from `path` (None if ffprobe isn't installed).
+fn decodable_frames(path: &Path) -> Option<usize> {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
+    )
+}
+
+#[test]
+fn unfinished_mp4_is_already_watchable() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("long.mp4");
+    // Long enough for several keyframe fragments (x264 keyint is 250).
+    let mut sp = short(out.clone(), 60);
+    sp.seconds = 10.0;
+    sp.width = 64;
+    sp.height = 48;
+    render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        &CancelToken::never(),
+        &mut |_| {},
+    )
+    .unwrap();
+    // A file still being written (or cut off by a crash) is a prefix of the
+    // finished one. Half of it must already play.
+    let bytes = std::fs::read(&out).unwrap();
+    let partial = dir.path().join("partial.mp4");
+    std::fs::write(&partial, &bytes[..bytes.len() / 2]).unwrap();
+    let Some(n) = decodable_frames(&partial) else {
+        return;
+    };
+    assert!(
+        n >= 250,
+        "only {n} frames decodable from a half-written file"
+    );
 }
 
 #[test]
