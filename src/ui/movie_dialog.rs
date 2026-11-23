@@ -80,7 +80,8 @@ fn cost_text(cost: f64) -> String {
         "about the same as Exact".to_string()
     } else if cost < 1.0 {
         let speedup = 1.0 / cost;
-        if speedup >= 10.0 {
+        // Whatever prints as 10.0 or more drops the decimal.
+        if speedup >= 9.95 {
             format!("≈ {speedup:.0}× faster than Exact")
         } else {
             format!("≈ {speedup:.1}× faster than Exact")
@@ -720,6 +721,9 @@ mod tests {
         );
         assert_eq!(cost_text(1.0), "about the same as Exact");
         assert_eq!(cost_text(0.5), "≈ 2.0× faster than Exact");
+        // 1 / 0.1003 ≈ 9.97 rounds to 10: no "10.0×".
+        assert_eq!(cost_text(0.1003), "≈ 10× faster than Exact");
+        assert_eq!(cost_text(0.1007), "≈ 9.9× faster than Exact");
     }
 
     #[test]
