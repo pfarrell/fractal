@@ -3,6 +3,7 @@
 use crate::engine::bookmark::{Bookmark, BookmarkView};
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
+use crate::engine::keyframe::Quality;
 use crate::engine::movie::{
     CameraPath, MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie,
 };
@@ -216,6 +217,7 @@ impl MovieDialog {
             output: PathBuf::from(&self.output),
             path: self.path,
             rotation: self.rotation,
+            quality: Quality::Exact,
         }
     }
 

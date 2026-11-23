@@ -22,6 +22,7 @@
 
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate};
+use crate::engine::keyframe::Quality;
 use crate::engine::render::{CancelToken, Sampler, render};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
@@ -110,6 +111,9 @@ pub struct MovieSpec {
     /// Degrees per second the picture turns (negative: the other way).
     #[serde(default)]
     pub rotation: f64,
+    /// Exact renders every frame; Fast and Smooth resample keyframes.
+    #[serde(default)]
+    pub quality: Quality,
 }
 
 pub enum MovieProgress {
@@ -321,6 +325,15 @@ impl MovieSpec {
     pub fn frame_angle(&self, i: usize) -> f64 {
         let t = i as f64 / (self.frame_count() - 1) as f64;
         self.rotation.to_radians() * t * self.seconds
+    }
+
+    /// Frame `i`'s four corners in the complex plane, turned with the
+    /// frame: top-left, top-right, bottom-right, bottom-left.
+    pub fn frame_corners(&self, i: usize) -> [Complex64; 4] {
+        let view = self.frame_view(i);
+        let angle = self.frame_angle(i);
+        let (w, h) = (view.width as f64, view.height as f64);
+        [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| rotated_point(&view, angle, x, y))
     }
 
     /// The camera path's offset from the straight zoom at `time` seconds,

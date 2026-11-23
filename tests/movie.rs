@@ -1,5 +1,6 @@
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::escape::FractalKind;
+use fractal_explorer::engine::keyframe::Quality;
 use fractal_explorer::engine::movie::{
     CIRCLE_PERIOD_S, CIRCLE_RADIUS, CameraPath, Kept, MovieError, MovieProgress, MovieSpec,
     RotatedSampler, ffmpeg_args, ffmpeg_install_hint, find_program, render_movie, rotated_point,
@@ -28,6 +29,7 @@ fn spec(out: PathBuf) -> MovieSpec {
         output: out,
         path: CameraPath::Straight,
         rotation: 0.0,
+        quality: Quality::Exact,
     }
 }
 

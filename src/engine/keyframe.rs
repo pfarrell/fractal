@@ -1,7 +1,190 @@
-//! Keyframe samples packed into 4 bytes so a movie frame can be colored
-//! with its own iteration cutoff.
+//! Keyframe movies: frames grouped into stretches, each resampled from
+//! one large keyframe whose samples are packed into 4 bytes so a movie
+//! frame can be colored with its own iteration cutoff.
 use crate::engine::color::{ColorSettings, Palette, sample_color};
 use crate::engine::escape::Sample;
+use crate::engine::movie::MovieSpec;
+use crate::engine::viewport::{Viewport, min_pixel_scale};
+use num_complex::Complex64;
+use serde::{Deserialize, Serialize};
+use std::ops::Range;
+
+/// How a movie's frames are made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Quality {
+    /// Every frame rendered on its own.
+    #[default]
+    Exact,
+    /// Frames resampled from keyframes, one sample per deepest-frame pixel.
+    Fast,
+    /// Like Fast with 2×2 samples per deepest-frame pixel.
+    Smooth,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 3] = [Quality::Exact, Quality::Fast, Quality::Smooth];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Quality::Exact => "Exact",
+            Quality::Fast => "Fast",
+            Quality::Smooth => "Smooth",
+        }
+    }
+
+    /// Keyframe samples per deepest-frame pixel, per axis. `None`: Exact.
+    pub fn q(&self) -> Option<u32> {
+        match self {
+            Quality::Exact => None,
+            Quality::Fast => Some(1),
+            Quality::Smooth => Some(2),
+        }
+    }
+}
+
+/// The most samples one keyframe may hold.
+pub const KEYFRAME_MAX_PIXELS: usize = 80_000_000;
+
+/// Largest span / smallest span allowed within one stretch.
+const MAX_SPAN_RATIO: f64 = 2.0;
+
+/// Margin around a stretch's frames, in keyframe pixels, for the
+/// resampling filter.
+const MARGIN_PIXELS: f64 = 2.0;
+
+/// Consecutive frames resampled from one keyframe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stretch {
+    pub frames: Range<usize>,
+    /// The keyframe: axis-aligned, covering every frame in `frames`.
+    pub view: Viewport,
+    /// Samples per deepest-frame pixel, per axis.
+    pub q: u32,
+    /// Iterations for the keyframe: the deepest frame's budget.
+    pub max_iter: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Block {
+    Keyframe(Stretch),
+    /// Frames too big for any keyframe, rendered the Exact way.
+    Exact(Range<usize>),
+}
+
+/// What the frames of a growing stretch cover.
+#[derive(Clone, Copy)]
+struct Bounds {
+    lo: Complex64,
+    hi: Complex64,
+    min_span: f64,
+    max_span: f64,
+    /// The frame with the smallest span.
+    deepest: usize,
+}
+
+impl Bounds {
+    fn of(spec: &MovieSpec, i: usize) -> Bounds {
+        let span = spec.frame_view(i).span;
+        let empty = Bounds {
+            lo: Complex64::new(f64::INFINITY, f64::INFINITY),
+            hi: Complex64::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            min_span: span,
+            max_span: span,
+            deepest: i,
+        };
+        empty.with(spec, i)
+    }
+
+    fn with(mut self, spec: &MovieSpec, i: usize) -> Bounds {
+        for c in spec.frame_corners(i) {
+            self.lo = Complex64::new(self.lo.re.min(c.re), self.lo.im.min(c.im));
+            self.hi = Complex64::new(self.hi.re.max(c.re), self.hi.im.max(c.im));
+        }
+        let span = spec.frame_view(i).span;
+        if span < self.min_span {
+            self.min_span = span;
+            self.deepest = i;
+        }
+        self.max_span = self.max_span.max(span);
+        self
+    }
+
+    /// The keyframe covering these frames, `q` samples per deepest-frame
+    /// pixel but no finer than f64 can resolve.
+    fn keyframe(&self, frame_height: usize, q: u32) -> Viewport {
+        let center = (self.lo + self.hi) / 2.0;
+        let spacing = (self.min_span / frame_height as f64 / q as f64).max(min_pixel_scale(center));
+        let size = self.hi - self.lo;
+        let cells = |extent: f64| (extent / spacing + 2.0 * MARGIN_PIXELS).ceil() as usize;
+        let (width, height) = (cells(size.re), cells(size.im));
+        Viewport::new(center, height as f64 * spacing, width, height)
+    }
+}
+
+fn fits(view: &Viewport, max_pixels: usize) -> bool {
+    view.width.saturating_mul(view.height) <= max_pixels
+}
+
+/// Group `spec`'s frames into stretches, greedily: each grows while its
+/// span ratio stays within 2 and its keyframe within `max_pixels`. A
+/// frame whose keyframe is too big even alone drops to `q` = 1, and
+/// failing that is rendered Exact. The blocks cover every frame in order.
+pub fn plan(spec: &MovieSpec, q: u32, max_pixels: usize) -> Vec<Block> {
+    let (n, h) = (spec.frame_count(), spec.height);
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let mut bounds = Bounds::of(spec, i);
+        let Some(q) = [q, 1]
+            .into_iter()
+            .find(|&q| fits(&bounds.keyframe(h, q), max_pixels))
+        else {
+            match blocks.last_mut() {
+                Some(Block::Exact(r)) => r.end = i + 1,
+                _ => blocks.push(Block::Exact(i..i + 1)),
+            }
+            i += 1;
+            continue;
+        };
+        let mut end = i + 1;
+        while end < n {
+            let grown = bounds.with(spec, end);
+            if grown.max_span / grown.min_span > MAX_SPAN_RATIO
+                || !fits(&grown.keyframe(h, q), max_pixels)
+            {
+                break;
+            }
+            bounds = grown;
+            end += 1;
+        }
+        let magnification = spec.frame_view(bounds.deepest).magnification();
+        blocks.push(Block::Keyframe(Stretch {
+            frames: i..end,
+            view: bounds.keyframe(h, q),
+            q,
+            max_iter: spec.max_iter.resolve(magnification),
+        }));
+        i = end;
+    }
+    blocks
+}
+
+/// Samples rendered for `spec`, relative to Exact: keyframe samples plus
+/// the pixels of frames rendered Exact, over every frame's pixels.
+pub fn estimated_cost(spec: &MovieSpec) -> f64 {
+    let Some(q) = spec.quality.q() else {
+        return 1.0;
+    };
+    let frame = (spec.width * spec.height) as f64;
+    let samples: f64 = plan(spec, q, KEYFRAME_MAX_PIXELS)
+        .iter()
+        .map(|b| match b {
+            Block::Keyframe(s) => (s.view.width * s.view.height) as f64,
+            Block::Exact(r) => r.len() as f64 * frame,
+        })
+        .sum();
+    samples / (frame * spec.frame_count() as f64)
+}
 
 const TAG_SHIFT: u32 = 30;
 const TAG_ESCAPED: u32 = 1;
