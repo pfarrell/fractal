@@ -372,28 +372,72 @@ fn unfinished_mp4_is_already_watchable() {
     );
 }
 
+/// Render `sp`, cancelling once `after` frames are done.
+fn cancel_after(sp: &MovieSpec, after: usize) -> Result<PathBuf, MovieError> {
+    let generation = Arc::new(AtomicU64::new(0));
+    let token = CancelToken::new(generation.clone(), 0);
+    if after == 0 {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
+    render_movie(sp, 2, Path::new("ffmpeg"), &token, &mut |p| {
+        if let MovieProgress::Frame { done, .. } = p
+            && done == after
+        {
+            generation.fetch_add(1, Ordering::Relaxed);
+        }
+    })
+}
+
 #[test]
-fn cancel_stops_early_and_removes_partial_file() {
+fn cancel_keeps_the_frames_rendered_so_far() {
     if !have_ffmpeg() {
         return;
     }
-    let generation = Arc::new(AtomicU64::new(0));
-    let token = CancelToken::new(generation.clone(), 0);
+    let dir = tempfile::tempdir().unwrap();
+    for ext in ["mp4", "mkv", "mov"] {
+        let out = dir.path().join(format!("c.{ext}"));
+        let r = cancel_after(&short(out.clone(), 30), 5);
+        let Err(MovieError::Cancelled {
+            kept: Some((path, n)),
+        }) = r
+        else {
+            panic!("{ext}: {r:?}");
+        };
+        assert_eq!(path, out);
+        assert!((5..30).contains(&n), "{ext}: kept {n}");
+        // ffmpeg was let finish, so every kept frame plays.
+        if let Some(playable) = decodable_frames(&out) {
+            assert_eq!(playable, n, "{ext}");
+        }
+    }
+}
+
+#[test]
+fn cancel_before_any_frame_leaves_no_file() {
+    if !have_ffmpeg() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("c.mp4");
-    let r = render_movie(
-        &short(out.clone(), 10),
-        2,
-        Path::new("ffmpeg"),
-        &token,
-        &mut |p| {
-            if let MovieProgress::Frame { done: 1, .. } = p {
-                generation.fetch_add(1, Ordering::Relaxed);
-            }
-        },
+    let r = cancel_after(&short(out.clone(), 10), 0);
+    assert!(
+        matches!(r, Err(MovieError::Cancelled { kept: None })),
+        "{r:?}"
     );
-    assert!(matches!(r, Err(MovieError::Cancelled)), "{r:?}");
-    assert!(!out.exists(), "partial movie left behind");
+    assert!(!out.exists(), "empty movie left behind");
+}
+
+#[test]
+fn cancelled_message_says_where_the_frames_are() {
+    let e = MovieError::Cancelled {
+        kept: Some((PathBuf::from("/m/z.mp4"), 42)),
+    };
+    assert_eq!(
+        e.to_string(),
+        "cancelled; the 42 frames rendered are in /m/z.mp4"
+    );
+    let e = MovieError::Cancelled { kept: None };
+    assert_eq!(e.to_string(), "cancelled");
 }
 
 #[test]

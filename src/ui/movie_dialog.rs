@@ -33,6 +33,8 @@ enum Status {
     },
     Encoding,
     Done(PathBuf),
+    /// Cancelled; says whether the frames so far were kept.
+    Cancelled(String),
     Failed(String),
 }
 
@@ -255,6 +257,10 @@ impl MovieDialog {
                 Msg::Progress(MovieProgress::Done(_)) => {}
                 Msg::Finished(Ok(path)) => {
                     self.status = Status::Done(path);
+                    finished = true;
+                }
+                Msg::Finished(Err(e @ MovieError::Cancelled { .. })) => {
+                    self.status = Status::Cancelled(e.to_string());
                     finished = true;
                 }
                 Msg::Finished(Err(e)) => {
@@ -495,6 +501,9 @@ impl MovieDialog {
             }
             Status::Done(path) => {
                 ui.label(format!("Saved {}", path.display()));
+            }
+            Status::Cancelled(msg) => {
+                ui.label(msg);
             }
             Status::Failed(msg) => {
                 ui.colored_label(ERROR, msg);

@@ -56,7 +56,11 @@ pub enum MovieProgress {
 #[derive(Debug)]
 pub enum MovieError {
     Invalid(String),
-    Cancelled,
+    /// Stopped by the user. `kept` is the output file and how many frames
+    /// it holds, when any were rendered.
+    Cancelled {
+        kept: Option<(PathBuf, usize)>,
+    },
     Io(std::io::Error),
     Ffmpeg {
         status: Option<i32>,
@@ -69,7 +73,14 @@ impl std::fmt::Display for MovieError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MovieError::Invalid(why) => write!(f, "invalid settings: {why}"),
-            MovieError::Cancelled => write!(f, "cancelled"),
+            MovieError::Cancelled { kept: None } => write!(f, "cancelled"),
+            MovieError::Cancelled {
+                kept: Some((path, n)),
+            } => write!(
+                f,
+                "cancelled; the {n} frames rendered are in {}",
+                path.display()
+            ),
             MovieError::Io(e) => write!(f, "file error: {e}"),
             MovieError::Ffmpeg {
                 status,
@@ -260,9 +271,15 @@ pub fn ffmpeg_args(fps: u32, width: usize, height: usize, output: &Path) -> Vec<
 /// Frames rendered ahead of the encoder. Each is width×height×4 bytes.
 const FRAMES_IN_FLIGHT: usize = 2;
 
+/// After a cancel, how long ffmpeg gets to encode the frames it has and
+/// close the file properly before it is killed.
+const CANCEL_GRACE: Duration = Duration::from_secs(30);
+
 /// Render a movie, streaming each frame into ffmpeg as it's done.
-/// Rendering the next frame overlaps encoding the last. On failure or
-/// cancel, a partial output file this run created is removed.
+/// Rendering the next frame overlaps encoding the last. On cancel, the
+/// frames rendered so far are kept as a shorter movie; on failure (or a
+/// cancel before any frame), a partial output file this run created is
+/// removed.
 pub fn render_movie(
     spec: &MovieSpec,
     threads: usize,
@@ -304,9 +321,18 @@ pub fn render_movie(
         Ok(())
     });
 
-    let rendered = render_frames(spec, &pool, cancel, &tx, progress);
+    let mut sent = 0;
+    let rendered = render_frames(spec, &pool, cancel, &tx, &mut sent, progress);
     drop(tx);
     let result = match rendered {
+        Err(MovieError::Cancelled { .. }) if sent > 0 => {
+            // stdin is closed once the writer drains, so ffmpeg encodes
+            // what it has and finalizes the file.
+            progress(MovieProgress::Encoding);
+            wind_down(&mut child);
+            let _ = writer.join();
+            Err(MovieError::Cancelled { kept: None })
+        }
         Ok(()) => {
             progress(MovieProgress::Encoding);
             let wrote = writer
@@ -326,6 +352,9 @@ pub fn render_movie(
             progress(MovieProgress::Done(spec.output.clone()));
             Ok(spec.output.clone())
         }
+        Err(MovieError::Cancelled { .. }) if sent > 0 => Err(MovieError::Cancelled {
+            kept: Some((spec.output.clone(), sent)),
+        }),
         Err(e) => {
             if !existed_before {
                 let _ = std::fs::remove_file(&spec.output);
@@ -341,13 +370,14 @@ fn render_frames(
     pool: &rayon::ThreadPool,
     cancel: &CancelToken,
     tx: &std::sync::mpsc::SyncSender<Vec<u8>>,
+    sent: &mut usize,
     progress: &mut dyn FnMut(MovieProgress),
 ) -> Result<(), MovieError> {
     let total = spec.frame_count();
     let mut pixels = vec![[0u8; 4]; spec.width * spec.height];
     for i in 0..total {
         if cancel.is_cancelled() {
-            return Err(MovieError::Cancelled);
+            return Err(MovieError::Cancelled { kept: None });
         }
         let start = Instant::now();
         let view = spec.frame_view(i);
@@ -355,12 +385,14 @@ fn render_frames(
             kind: spec.kind,
             max_iter: spec.max_iter.resolve(view.magnification()),
         };
-        let samples = render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled)?;
+        let samples =
+            render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled { kept: None })?;
         colorize(&samples, &spec.color, &mut pixels);
         if tx.send(pixels.as_flattened().to_vec()).is_err() {
             // The writer stopped: ffmpeg exited early. `finish` reports why.
             return Ok(());
         }
+        *sent += 1;
         progress(MovieProgress::Frame {
             done: i + 1,
             total,
@@ -370,8 +402,22 @@ fn render_frames(
     Ok(())
 }
 
-/// Wait for ffmpeg to finish encoding (killing it if cancelled) and turn
-/// its exit status into a result.
+/// Let ffmpeg exit on its own within [`CANCEL_GRACE`], else kill it. A
+/// killed fragmented MP4 still plays up to its last finished fragment.
+fn wind_down(child: &mut Child) {
+    let deadline = Instant::now() + CANCEL_GRACE;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Wait for ffmpeg to finish encoding and turn its exit status into a
+/// result. A cancel here gives it [`CANCEL_GRACE`] to finish first.
 fn finish(
     child: &mut Child,
     stderr_reader: std::thread::JoinHandle<String>,
@@ -383,9 +429,8 @@ fn finish(
             break status;
         }
         if cancel.is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(MovieError::Cancelled);
+            wind_down(child);
+            return Err(MovieError::Cancelled { kept: None });
         }
         std::thread::sleep(Duration::from_millis(50));
     };
