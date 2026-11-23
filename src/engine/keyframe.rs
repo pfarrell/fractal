@@ -2,12 +2,15 @@
 //! one large keyframe whose samples are packed into 4 bytes so a movie
 //! frame can be colored with its own iteration cutoff.
 use crate::engine::color::{ColorSettings, Palette, sample_color};
-use crate::engine::escape::Sample;
-use crate::engine::movie::MovieSpec;
+use crate::engine::escape::{FractalKind, Sample};
+use crate::engine::movie::{MovieSpec, rotated_point};
+use crate::engine::render::{CancelToken, F64Sampler, Sampler, render};
 use crate::engine::viewport::{Viewport, min_pixel_scale};
 use num_complex::Complex64;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
+use std::sync::LazyLock;
 
 /// How a movie's frames are made.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,13 +255,20 @@ pub fn tap_color(p: Packed, max_iter: u32, color: &ColorSettings, palette: &Pale
     sample_color(p.cut(max_iter), color, palette)
 }
 
+/// Linear light for every sRGB byte.
+static SRGB_TO_LINEAR: LazyLock<[f32; 256]> = LazyLock::new(|| {
+    std::array::from_fn(|v| {
+        let c = v as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    })
+});
+
 pub fn srgb_to_linear(v: u8) -> f32 {
-    let c = v as f32 / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    SRGB_TO_LINEAR[v as usize]
 }
 
 pub fn linear_to_srgb(x: f32) -> u8 {
@@ -269,6 +279,124 @@ pub fn linear_to_srgb(x: f32) -> u8 {
         1.055 * x.powf(1.0 / 2.4) - 0.055
     };
     (c * 255.0).round() as u8
+}
+
+/// Keyframe rows rendered (and packed) at a time, so a whole keyframe of
+/// unpacked samples never exists.
+const KEYFRAME_BAND_ROWS: usize = 64;
+
+/// A stretch's rendered keyframe: packed samples, row-major,
+/// `view.width × view.height`.
+#[derive(Clone, Debug)]
+pub struct Keyframe {
+    pub view: Viewport,
+    pub data: Vec<Packed>,
+}
+
+/// Samples a band of a keyframe at the keyframe's own pixel coordinates,
+/// so a banded render is bit-for-bit the plain render of the whole view.
+struct BandSampler<'a> {
+    inner: F64Sampler,
+    keyframe: &'a Viewport,
+    row0: usize,
+}
+
+impl Sampler for BandSampler<'_> {
+    fn sample(&self, _band: &Viewport, x: usize, y: usize) -> Sample {
+        self.inner.sample(self.keyframe, x, self.row0 + y)
+    }
+}
+
+/// Render `s`'s keyframe in bands of [`KEYFRAME_BAND_ROWS`], packing each
+/// band as it finishes. `None` if cancelled.
+pub fn render_keyframe(
+    kind: FractalKind,
+    s: &Stretch,
+    pool: &rayon::ThreadPool,
+    cancel: &CancelToken,
+) -> Option<Keyframe> {
+    let view = s.view;
+    let (w, h, scale) = (view.width, view.height, view.pixel_scale());
+    let inner = F64Sampler {
+        kind,
+        max_iter: s.max_iter,
+    };
+    let mut data = Vec::with_capacity(w * h);
+    for row0 in (0..h).step_by(KEYFRAME_BAND_ROWS) {
+        let rows = KEYFRAME_BAND_ROWS.min(h - row0);
+        let mid = (row0 as f64 + rows as f64 / 2.0 - h as f64 / 2.0) * scale;
+        let band = Viewport::new(
+            Complex64::new(view.center.re, view.center.im - mid),
+            rows as f64 * scale,
+            w,
+            rows,
+        );
+        let sampler = BandSampler {
+            inner,
+            keyframe: &view,
+            row0,
+        };
+        let samples = render(&sampler, &band, pool, cancel)?;
+        data.extend(samples.into_iter().map(Packed::pack));
+    }
+    Some(Keyframe { view, data })
+}
+
+/// Make `frame`, turned by `angle` radians, from keyframe `kf`: each
+/// output pixel averages, in linear light, `n × n` taps spread over its
+/// square, where `n` = frame pixel / keyframe pixel rounded up. Each tap
+/// takes the nearest keyframe sample, colored with the frame's
+/// `max_iter` cutoff. `out` is `frame.width × frame.height`.
+pub fn resample(
+    kf: &Keyframe,
+    frame: &Viewport,
+    angle: f64,
+    max_iter: u32,
+    color: &ColorSettings,
+    pool: &rayon::ThreadPool,
+    out: &mut [[u8; 4]],
+) {
+    debug_assert_eq!(out.len(), frame.width * frame.height);
+    debug_assert_eq!(kf.data.len(), kf.view.width * kf.view.height);
+    if frame.is_empty() || kf.view.is_empty() {
+        return;
+    }
+    let palette = Palette::get(color.palette);
+    let k = &kf.view;
+    let scale = k.pixel_scale();
+    let left = k.center.re - k.width as f64 * scale / 2.0;
+    let top = k.center.im + k.height as f64 * scale / 2.0;
+    let (max_x, max_y) = (k.width - 1, k.height - 1);
+    // Ratios a hair over a whole number are float noise, not another tap.
+    let n = ((frame.pixel_scale() / scale - 1e-9).ceil() as usize).max(1);
+    let taps = (n * n) as f32;
+    let tap = |x: f64, y: f64| {
+        let p = rotated_point(frame, angle, x, y);
+        let kx = (((p.re - left) / scale).floor().max(0.0) as usize).min(max_x);
+        let ky = (((top - p.im) / scale).floor().max(0.0) as usize).min(max_y);
+        tap_color(kf.data[ky * k.width + kx], max_iter, color, &palette)
+    };
+    pool.install(|| {
+        out.par_chunks_mut(frame.width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, px) in row.iter_mut().enumerate() {
+                    let mut sum = [0f32; 3];
+                    for b in 0..n {
+                        let ty = y as f64 + (b as f64 + 0.5) / n as f64;
+                        for a in 0..n {
+                            let tx = x as f64 + (a as f64 + 0.5) / n as f64;
+                            let c = tap(tx, ty);
+                            for (s, &v) in sum.iter_mut().zip(&c) {
+                                *s += srgb_to_linear(v);
+                            }
+                        }
+                    }
+                    let [r, g, b] = sum.map(|s| linear_to_srgb(s / taps));
+                    *px = [r, g, b, 255];
+                }
+            });
+    });
 }
 
 #[cfg(test)]

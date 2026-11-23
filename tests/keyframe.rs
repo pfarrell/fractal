@@ -1,9 +1,11 @@
-use fractal_explorer::engine::color::ColorSettings;
-use fractal_explorer::engine::escape::FractalKind;
+use fractal_explorer::engine::color::{ColorSettings, Palette, colorize};
+use fractal_explorer::engine::escape::{FractalKind, Sample};
 use fractal_explorer::engine::keyframe::{
-    Block, KEYFRAME_MAX_PIXELS, Quality, Stretch, estimated_cost, plan,
+    Block, KEYFRAME_MAX_PIXELS, Keyframe, Quality, Stretch, estimated_cost, linear_to_srgb, pack,
+    plan, render_keyframe, resample, srgb_to_linear, tap_color,
 };
-use fractal_explorer::engine::movie::{CameraPath, MovieSpec};
+use fractal_explorer::engine::movie::{CameraPath, MovieSpec, RotatedSampler};
+use fractal_explorer::engine::render::{CancelToken, F64Sampler, render};
 use fractal_explorer::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use std::path::PathBuf;
@@ -290,4 +292,248 @@ fn old_specs_load_as_exact() {
     json.as_object_mut().unwrap().remove("quality");
     let spec: MovieSpec = serde_json::from_value(json).unwrap();
     assert_eq!(spec.quality, Quality::Exact);
+}
+
+fn pool() -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new().build().unwrap()
+}
+
+fn plain_render(kind: FractalKind, view: &Viewport, max_iter: u32) -> Vec<Sample> {
+    let sampler = F64Sampler { kind, max_iter };
+    render(&sampler, view, &pool(), &CancelToken::never()).unwrap()
+}
+
+fn resampled(kf: &Keyframe, frame: &Viewport, angle: f64, max_iter: u32) -> Vec<[u8; 4]> {
+    let mut out = vec![[0u8; 4]; frame.width * frame.height];
+    let color = ColorSettings::default();
+    resample(kf, frame, angle, max_iter, &color, &pool(), &mut out);
+    out
+}
+
+/// Mean absolute difference per color channel (alpha ignored).
+fn mean_abs_diff(a: &[[u8; 4]], b: &[[u8; 4]]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .flat_map(|(p, q)| (0..3).map(move |c| p[c].abs_diff(q[c]) as u64))
+        .sum();
+    sum as f64 / (a.len() * 3) as f64
+}
+
+const SEAHORSE: Complex64 = Complex64::new(-0.7453, 0.1127);
+
+#[test]
+fn keyframe_matches_a_plain_render() {
+    // 150 rows: two full bands and a partial one.
+    let view = Viewport::new(Complex64::new(-0.74, 0.12), 0.05, 173, 150);
+    let s = Stretch {
+        frames: 0..1,
+        view,
+        q: 2,
+        max_iter: 300,
+    };
+    let kind = FractalKind::Mandelbrot;
+    let kf = render_keyframe(kind, &s, &pool(), &CancelToken::never()).unwrap();
+    assert_eq!(kf.view, view);
+    let want: Vec<_> = plain_render(kind, &view, 300)
+        .into_iter()
+        .map(pack)
+        .collect();
+    assert!(
+        kf.data == want,
+        "banded keyframe differs from a plain render"
+    );
+}
+
+#[test]
+fn same_grid_resample_is_exact() {
+    let frame = Viewport::new(SEAHORSE, 0.02, 96, 54);
+    let s = Stretch {
+        frames: 0..1,
+        view: frame,
+        q: 1,
+        max_iter: 400,
+    };
+    let kind = FractalKind::Mandelbrot;
+    let kf = render_keyframe(kind, &s, &pool(), &CancelToken::never()).unwrap();
+    let got = resampled(&kf, &frame, 0.0, 400);
+    let samples = plain_render(kind, &frame, 400);
+    let color = ColorSettings::default();
+    // Packing keeps the smooth fraction to a 256th of an iteration, which
+    // can move a channel by one; the resampling itself adds nothing.
+    let mut want = vec![[0u8; 4]; 96 * 54];
+    colorize(&samples, &color, &mut want);
+    for (g, w) in got.iter().zip(&want) {
+        assert!((0..4).all(|c| g[c].abs_diff(w[c]) <= 1), "{g:?} vs {w:?}");
+    }
+    let packed: Vec<_> = samples.iter().map(|&s| pack(s).cut(400)).collect();
+    colorize(&packed, &color, &mut want);
+    assert!(got == want);
+}
+
+fn uniform_keyframe(view: Viewport, f: impl Fn(usize, usize) -> Sample) -> Keyframe {
+    let data = (0..view.height)
+        .flat_map(|y| (0..view.width).map(move |x| (x, y)))
+        .map(|(x, y)| pack(f(x, y)))
+        .collect();
+    Keyframe { view, data }
+}
+
+#[test]
+fn constant_keyframe_stays_constant() {
+    let escaped = Sample::Escaped {
+        iter: 37,
+        smooth: 37.25,
+    };
+    let kf = uniform_keyframe(
+        Viewport::new(Complex64::new(0.0, 0.0), 2.0, 120, 100),
+        |_, _| escaped,
+    );
+    let color = ColorSettings::default();
+    let want = tap_color(pack(escaped), 1000, &color, &Palette::get(color.palette));
+    for span in [0.3, 1.0, 1.9] {
+        for angle in [0.0, 0.4, std::f64::consts::FRAC_PI_2, 2.5] {
+            let frame = Viewport::new(Complex64::new(0.1, -0.05), span, 40, 30);
+            let out = resampled(&kf, &frame, angle, 1000);
+            assert!(
+                out.iter().all(|&p| p == want),
+                "span {span} angle {angle}: not constant"
+            );
+        }
+    }
+}
+
+#[test]
+fn quarter_turn_rotates_the_picture() {
+    let view = Viewport::new(Complex64::new(0.0, 0.0), 2.0, 100, 100);
+    let kf = uniform_keyframe(view, |x, _| {
+        if x < 50 {
+            Sample::Inside
+        } else {
+            Sample::Escaped {
+                iter: 5,
+                smooth: 5.5,
+            }
+        }
+    });
+    let out = resampled(&kf, &view, std::f64::consts::FRAC_PI_2, 1000);
+    let black = [0, 0, 0, 255];
+    // Turned a quarter counterclockwise (as `rotated_point` and the Exact
+    // path do), a frame's top row looks at the plane's left side: the
+    // Inside half ends up on top, the colored half below.
+    for y in (0..45).chain(55..100) {
+        for x in 0..100 {
+            let p = out[y * 100 + x];
+            if y < 45 {
+                assert_eq!(p, black, "({x}, {y}) should be black");
+            } else {
+                assert_ne!(p, black, "({x}, {y}) should be colored");
+            }
+        }
+    }
+}
+
+#[test]
+fn frame_cutoff_applies() {
+    let view = Viewport::new(Complex64::new(0.0, 0.0), 2.0, 64, 64);
+    let kf = uniform_keyframe(view, |_, _| Sample::Escaped {
+        iter: 800,
+        smooth: 800.5,
+    });
+    let frame = Viewport::new(Complex64::new(0.0, 0.0), 1.0, 32, 18);
+    let out = resampled(&kf, &frame, 0.3, 500);
+    assert!(out.iter().all(|&p| p == [0, 0, 0, 255]));
+    let out = resampled(&kf, &frame, 0.3, 800);
+    assert!(out.iter().all(|&p| p != [0, 0, 0, 255]));
+}
+
+/// A short zoom into seahorse valley at 96×54.
+fn seahorse(quality: Quality, rotation: f64) -> MovieSpec {
+    MovieSpec {
+        start_center: SEAHORSE,
+        target: SEAHORSE,
+        start_span: 0.05,
+        end_span: 0.002,
+        fps: 10,
+        seconds: 2.0,
+        width: 96,
+        height: 54,
+        rotation,
+        ..base(quality)
+    }
+}
+
+/// Frame `i` rendered Exact at 8×8 samples per pixel, averaged in linear light.
+fn supersampled(spec: &MovieSpec, i: usize) -> Vec<[u8; 4]> {
+    const N: usize = 8;
+    let view = spec.frame_view(i);
+    let big = view.with_size(view.width * N, view.height * N);
+    let sampler = RotatedSampler {
+        kind: spec.kind,
+        max_iter: spec.max_iter.resolve(view.magnification()),
+        angle: spec.frame_angle(i),
+    };
+    let samples = render(&sampler, &big, &pool(), &CancelToken::never()).unwrap();
+    let mut colors = vec![[0u8; 4]; samples.len()];
+    colorize(&samples, &spec.color, &mut colors);
+    let mut out = vec![[0u8; 4]; view.width * view.height];
+    for (k, px) in out.iter_mut().enumerate() {
+        let (x, y) = (k % view.width, k / view.width);
+        let mut sum = [0f32; 3];
+        for b in 0..N {
+            for a in 0..N {
+                let c = colors[(y * N + b) * big.width + x * N + a];
+                for ch in 0..3 {
+                    sum[ch] += srgb_to_linear(c[ch]);
+                }
+            }
+        }
+        let n2 = (N * N) as f32;
+        *px = [
+            linear_to_srgb(sum[0] / n2),
+            linear_to_srgb(sum[1] / n2),
+            linear_to_srgb(sum[2] / n2),
+            255,
+        ];
+    }
+    out
+}
+
+/// Frame `i` resampled from stretch `s`'s keyframe.
+fn from_keyframe(spec: &MovieSpec, s: &Stretch, i: usize) -> Vec<[u8; 4]> {
+    let kf = render_keyframe(spec.kind, s, &pool(), &CancelToken::never()).unwrap();
+    let view = spec.frame_view(i);
+    let max_iter = spec.max_iter.resolve(view.magnification());
+    resampled(&kf, &view, spec.frame_angle(i), max_iter)
+}
+
+#[test]
+fn smooth_agrees_with_supersampled_exact() {
+    let spec = seahorse(Quality::Smooth, 20.0);
+    let blocks = plan(&spec, 2, KEYFRAME_MAX_PIXELS);
+    let s = stretches(&blocks).next().unwrap();
+    for i in [s.frames.start, s.frames.end - 1] {
+        let err = mean_abs_diff(&from_keyframe(&spec, s, i), &supersampled(&spec, i));
+        assert!(err < 0.03 * 255.0, "frame {i}: mean abs error {err}");
+    }
+}
+
+#[test]
+fn no_pulse_between_keyframes() {
+    // Bounds tuned once against this movie: Smooth measured 2.78 %, Fast
+    // 4.50 %. What's left is the gap between 2×2 and 4×4 area filtering
+    // (Exact 2×2 vs 4×4 supersampling differ about as much here).
+    for (quality, bound) in [(Quality::Smooth, 0.035), (Quality::Fast, 0.05)] {
+        let spec = seahorse(quality, 0.0);
+        let blocks = plan(&spec, quality.q().unwrap(), KEYFRAME_MAX_PIXELS);
+        let mut it = stretches(&blocks);
+        let (s0, s1) = (it.next().unwrap(), it.next().unwrap());
+        assert_eq!(s0.frames.end, s1.frames.start);
+        // The first frame of the second stretch, from the keyframe of the
+        // stretch that ends there and of the one that starts there.
+        let i = s1.frames.start;
+        let diff = mean_abs_diff(&from_keyframe(&spec, s0, i), &from_keyframe(&spec, s1, i));
+        assert!(diff < bound * 255.0, "{quality:?}: {diff}");
+    }
 }
