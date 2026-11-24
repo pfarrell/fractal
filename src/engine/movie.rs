@@ -253,10 +253,13 @@ impl MovieSpec {
         {
             return bad("zoom spans must be positive");
         }
-        if self
-            .stops
-            .windows(2)
-            .any(|w| step_length(&w[0], &w[1]) == 0.0)
+        // Two stops may be the same view (the movie just turns in place);
+        // in a longer route a zero-length step would get no time at all.
+        if self.stops.len() > 2
+            && self
+                .stops
+                .windows(2)
+                .any(|w| step_length(&w[0], &w[1]) == 0.0)
         {
             return bad("two stops in a row are the same view");
         }

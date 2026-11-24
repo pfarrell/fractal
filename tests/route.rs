@@ -182,3 +182,23 @@ fn outside_previous_detects_cross_branch_steps() {
     assert!(!outside_previous(&n[0], &n[1], 64, 48));
     assert!(!outside_previous(&n[1], &n[2], 64, 48));
 }
+
+#[test]
+fn never_dips_past_a_pan_stop() {
+    // Zoom in, then pan sideways at the same depth: the blend must not
+    // zoom deeper than that depth and back out.
+    let stops = [
+        st(-0.5, 0.0, 3.0, 0.0),
+        st(-0.75, 0.1, 1e-6, 0.0),
+        st(-0.75 + 3e-6, 0.1, 1e-6, 0.0),
+    ];
+    for seconds in [2.0, 10.0] {
+        let r = Route::new(&stops, seconds, JOINT_HALF_WIDTH_S);
+        let n = (seconds * FPS) as usize + 1;
+        let min = frames(&r, seconds, n)
+            .iter()
+            .map(|f| f.1)
+            .fold(f64::MAX, f64::min);
+        assert!(min >= 1e-6 * (1.0 - 1e-9), "{seconds} s: {min}");
+    }
+}

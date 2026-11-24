@@ -881,3 +881,20 @@ fn fast_and_smooth_three_stop_movie_decodes() {
         }
     }
 }
+
+#[test]
+fn spin_in_place_is_a_valid_movie() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sp = spec(dir.path().join("o.mp4"));
+    sp.stops[1] = Stop {
+        rotation: 10.0,
+        ..sp.stops[0]
+    };
+    assert!(sp.validate().is_ok(), "{:?}", sp.validate());
+    for i in [0, sp.frame_count() / 2, sp.frame_count() - 1] {
+        let v = sp.frame_view(i);
+        assert_eq!((v.center, v.span), (sp.stops[0].center, sp.stops[0].span));
+    }
+    let last = sp.frame_angle(sp.frame_count() - 1);
+    assert!((last - 100f64.to_radians()).abs() < 1e-9, "{last}");
+}

@@ -354,8 +354,13 @@ impl MovieDialog {
     }
 
     /// Cost and memory fit of the current settings; the planner walks every
-    /// frame, so it only reruns when a setting changes.
-    fn estimate(&mut self, spec: &MovieSpec) -> Estimate {
+    /// frame, so it only reruns when a setting changes, and not while a
+    /// slider is being dragged (`dragging`): the last estimate stands until
+    /// the drag ends.
+    fn estimate(&mut self, spec: &MovieSpec, dragging: bool) -> Estimate {
+        if dragging && let Some((_, e)) = &self.estimate {
+            return *e;
+        }
         let key = EstimateKey {
             kind: spec.kind,
             stops: spec.stops.clone(),
@@ -577,7 +582,7 @@ impl MovieDialog {
                 if self.quality != Quality::Exact
                     && let Some(spec) = self.current_spec(&bookmarks.items)
                 {
-                    let estimate = self.estimate(&spec);
+                    let estimate = self.estimate(&spec, ui.ctx().dragged_id().is_some());
                     ui.label("");
                     ui.vertical(|ui| {
                         ui.small(cost_text(estimate.cost));
@@ -888,12 +893,12 @@ mod tests {
             ..MovieDialog::default()
         };
         let start = current();
-        let a = d.estimate(&d.spec(&start));
+        let a = d.estimate(&d.spec(&start), false);
         assert_eq!(d.estimate_runs, 1);
-        assert_eq!(d.estimate(&d.spec(&start)), a);
+        assert_eq!(d.estimate(&d.spec(&start), false), a);
         assert_eq!(d.estimate_runs, 1);
         d.rotation = 10.0;
-        d.estimate(&d.spec(&start));
+        d.estimate(&d.spec(&start), false);
         assert_eq!(d.estimate_runs, 2);
     }
 
@@ -1038,5 +1043,23 @@ mod tests {
         d.refresh_mode(&[]);
         assert_eq!(d.route, RouteMode::StartEnd);
         assert!(d.current_spec(&[]).is_some());
+    }
+
+    #[test]
+    fn estimate_waits_while_a_slider_is_dragged() {
+        let mut d = MovieDialog {
+            seconds: 2.0,
+            fps: 24,
+            width: 64,
+            height: 48,
+            ..MovieDialog::default()
+        };
+        let start = current();
+        let a = d.estimate(&d.spec(&start), false);
+        d.rotation = 10.0;
+        assert_eq!(d.estimate(&d.spec(&start), true), a);
+        assert_eq!(d.estimate_runs, 1);
+        d.estimate(&d.spec(&start), false);
+        assert_eq!(d.estimate_runs, 2);
     }
 }

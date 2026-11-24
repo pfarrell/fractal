@@ -138,7 +138,13 @@ impl Route {
         let (ca, sa) = self.step_view(j - 1, t);
         let (cb, sb) = self.step_view(j, t);
         let span = (sa.ln() + (sb.ln() - sa.ln()) * w).exp();
-        (ca + (cb - ca) * w, span)
+        // A step extended past its end keeps zooming; next to a step at
+        // one depth that would dip past the stop and back. Stay within
+        // the depths of the stops around the joint.
+        let near = &self.stops[j - 1..=j + 1];
+        let lo = near.iter().map(|s| s.span).fold(f64::MAX, f64::min);
+        let hi = near.iter().map(|s| s.span).fold(f64::MIN, f64::max);
+        (ca + (cb - ca) * w, span.clamp(lo, hi))
     }
 
     /// The step whose time range holds `t` (the last step holds the end).
