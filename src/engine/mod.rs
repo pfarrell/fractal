@@ -8,4 +8,5 @@ pub mod keyframe;
 pub mod movie;
 pub mod newton;
 pub mod render;
+pub mod route;
 pub mod viewport;
