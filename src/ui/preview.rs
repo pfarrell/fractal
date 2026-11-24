@@ -7,6 +7,7 @@ use crate::engine::preview::{
     spawn_preview, window_at,
 };
 use crate::engine::render::CancelToken;
+use eframe::egui;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,7 +43,35 @@ pub struct Preview {
     pub progress: (usize, usize),
     /// Why the last render stopped, if not finished or cancelled.
     pub error: Option<String>,
+    /// The frame on screen and its texture.
+    texture: Option<(usize, egui::TextureHandle)>,
 }
+
+/// What the player asks the dialog to do (it needs the current settings).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlayerAction {
+    None,
+    /// Preview the window after this one.
+    NextWindow,
+    /// Preview the window starting at the playhead.
+    FromHere,
+    /// Preview this window again with the current settings.
+    Repreview,
+    /// Drop the preview and its frames.
+    Discard,
+}
+
+/// "m:ss".
+fn clock(t: f64) -> String {
+    let s = t.max(0.0).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+const SCRUB_HEIGHT: f32 = 22.0;
+const DIM: egui::Color32 = egui::Color32::from_gray(45);
+const WINDOW: egui::Color32 = egui::Color32::from_gray(80);
+const RENDERED: egui::Color32 = egui::Color32::from_rgb(90, 140, 220);
+const STALE: egui::Color32 = egui::Color32::from_rgb(230, 170, 60);
 
 impl Preview {
     /// An empty preview of `final_spec`'s path (nothing rendered yet).
@@ -59,6 +88,7 @@ impl Preview {
             rx: None,
             progress: (0, 0),
             error: None,
+            texture: None,
         }
     }
 
@@ -220,6 +250,242 @@ impl Preview {
     pub fn seek_time(&mut self, t: f64) {
         self.playhead = frame_at_time(&self.spec, t);
         self.clock = 0.0;
+    }
+}
+
+impl Preview {
+    /// Movie time of the playhead.
+    pub fn playhead_time(&self) -> f64 {
+        self.spec.frame_time(self.playhead)
+    }
+
+    /// The player: picture, scrub bar, readout and controls. `current` is
+    /// the movie the dialog's settings describe now (for the stale check);
+    /// `can_start` says whether a new preview render may begin.
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        current: Option<&MovieSpec>,
+        can_start: bool,
+    ) -> PlayerAction {
+        self.receive();
+        let mut action = PlayerAction::None;
+        let ctx = ui.ctx().clone();
+        if ctx.memory(|m| m.focused().is_none()) {
+            let (space, left, right) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Space),
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::ArrowRight),
+                )
+            });
+            if space {
+                self.toggle_play();
+            }
+            if left {
+                self.playing = false;
+                self.step(-1);
+            }
+            if right {
+                self.playing = false;
+                self.step(1);
+            }
+        }
+        self.tick(ui.input(|i| i.stable_dt) as f64);
+        if self.playing || self.is_rendering() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0 / PREVIEW_FPS as f64));
+        }
+
+        self.picture(ui);
+        self.scrub_bar(ui);
+        self.readout(ui);
+        ui.horizontal(|ui| {
+            let label = if self.playing { "⏸" } else { "▶" };
+            if ui.button(label).clicked() {
+                self.toggle_play();
+            }
+            ui.checkbox(&mut self.looping, "loop");
+            ui.add_enabled_ui(can_start && current.is_some(), |ui| {
+                if self.window.end < self.spec.frame_count() && ui.button("Next 5 min").clicked() {
+                    action = PlayerAction::NextWindow;
+                }
+                if ui.button("Preview from here").clicked() {
+                    action = PlayerAction::FromHere;
+                }
+            });
+            if ui.button("Discard preview").clicked() {
+                action = PlayerAction::Discard;
+            }
+        });
+        if self.is_rendering() {
+            let (done, total) = self.progress;
+            let frac = if total > 0 {
+                done as f32 / total as f32
+            } else {
+                0.0
+            };
+            ui.add(egui::ProgressBar::new(frac).text(format!("previewing {done}/{total} frames")));
+        }
+        if let Some(e) = &self.error {
+            ui.colored_label(egui::Color32::from_rgb(240, 90, 90), e);
+        }
+        if self.is_stale(current) {
+            ui.horizontal(|ui| {
+                ui.colored_label(STALE, "settings changed — re-preview");
+                if ui
+                    .add_enabled(
+                        can_start && current.is_some(),
+                        egui::Button::new("Re-preview"),
+                    )
+                    .clicked()
+                {
+                    action = PlayerAction::Repreview;
+                }
+            });
+        }
+        action
+    }
+
+    fn toggle_play(&mut self) {
+        if !self.playing
+            && (!self.window.contains(&self.playhead) || self.playhead + 1 >= self.window.end)
+        {
+            self.playhead = self.window.start;
+        }
+        self.playing = !self.playing;
+        self.clock = 0.0;
+    }
+
+    fn picture(&mut self, ui: &mut egui::Ui) {
+        let (w, h) = (self.spec.width, self.spec.height);
+        let width = ui.available_width();
+        let size = egui::vec2(width, width * h as f32 / w as f32);
+        if let Some(rgb) = self.frame_rgb(self.playhead).cloned()
+            && self
+                .texture
+                .as_ref()
+                .is_none_or(|(i, _)| *i != self.playhead)
+        {
+            let image = egui::ColorImage::from_rgb([w, h], &rgb);
+            match &mut self.texture {
+                Some((i, t)) if t.size() == [w, h] => {
+                    t.set(image, egui::TextureOptions::LINEAR);
+                    *i = self.playhead;
+                }
+                _ => {
+                    let t =
+                        ui.ctx()
+                            .load_texture("movie_preview", image, egui::TextureOptions::LINEAR);
+                    self.texture = Some((self.playhead, t));
+                }
+            }
+        }
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+        let shown = self.frame_rgb(self.playhead).is_some();
+        if let Some((_, t)) = &self.texture {
+            let tint = if shown {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_gray(70)
+            };
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(t.id(), rect, uv, tint);
+        }
+        if !shown {
+            let text = if self.window.contains(&self.playhead) {
+                "rendering…"
+            } else {
+                "not previewed here — Preview from here"
+            };
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(14.0),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+
+    fn scrub_bar(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(width, SCRUB_HEIGHT + 12.0),
+            egui::Sense::click_and_drag(),
+        );
+        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(width, SCRUB_HEIGHT));
+        let n = self.spec.frame_count();
+        let x_of = |i: f64| bar.left() + bar.width() * (i / (n - 1).max(1) as f64) as f32;
+        let span_rect = |a: usize, b: usize| {
+            egui::Rect::from_x_y_ranges(x_of(a as f64)..=x_of(b as f64), bar.y_range())
+        };
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(bar, 2.0, DIM);
+        if !self.window.is_empty() {
+            painter.rect_filled(
+                span_rect(self.window.start, self.window.end - 1),
+                0.0,
+                WINDOW,
+            );
+        }
+        let mut run: Option<usize> = None;
+        for i in self.window.clone().chain(std::iter::once(usize::MAX)) {
+            let have = i != usize::MAX && self.frame_rgb(i).is_some();
+            match (run, have) {
+                (None, true) => run = Some(i),
+                (Some(a), false) => {
+                    painter.rect_filled(span_rect(a, i - 1), 0.0, RENDERED);
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        let route = self.spec.route();
+        for (k, t) in route.step_times().iter().enumerate() {
+            let x = x_of(t / self.spec.seconds * (n - 1) as f64);
+            painter.line_segment(
+                [egui::pos2(x, bar.top()), egui::pos2(x, bar.bottom())],
+                egui::Stroke::new(1.0, egui::Color32::WHITE),
+            );
+            painter.text(
+                egui::pos2(x, bar.bottom() + 1.0),
+                egui::Align2::CENTER_TOP,
+                format!("{}", k + 1),
+                egui::FontId::proportional(10.0),
+                egui::Color32::LIGHT_GRAY,
+            );
+        }
+        let x = x_of(self.playhead as f64);
+        painter.line_segment(
+            [
+                egui::pos2(x, bar.top() - 2.0),
+                egui::pos2(x, bar.bottom() + 2.0),
+            ],
+            egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 230, 120)),
+        );
+        if let Some(pos) = resp.interact_pointer_pos()
+            && (resp.dragged() || resp.clicked())
+        {
+            let f = ((pos.x - bar.left()) / bar.width()).clamp(0.0, 1.0) as f64;
+            self.seek_time(f * self.spec.seconds);
+        }
+    }
+
+    fn readout(&self, ui: &mut egui::Ui) {
+        let t = self.playhead_time();
+        let times = self.spec.route().step_times().to_vec();
+        let k = (0..times.len() - 1)
+            .find(|&k| t < times[k + 1])
+            .unwrap_or(times.len() - 2);
+        ui.horizontal(|ui| {
+            ui.monospace(format!("{} / {}", clock(t), clock(self.spec.seconds)));
+            ui.separator();
+            ui.label(format!("step {} → {}", k + 1, k + 2));
+            ui.separator();
+            ui.label(format!("turn {:+.0} °/s", self.spec.stops[k + 1].rotation));
+        });
     }
 }
 

@@ -5,10 +5,12 @@ use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie};
+use crate::engine::preview::{frame_at_time, preview_spec};
 use crate::engine::render::CancelToken;
 use crate::engine::route::{Stop, outside_previous};
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use crate::ui::bookmarks::BookmarksUi;
+use crate::ui::preview::{PlayerAction, Preview};
 use eframe::egui;
 use num_complex::Complex64;
 use std::path::PathBuf;
@@ -203,6 +205,8 @@ pub struct MovieDialog {
     job: Option<MovieJob>,
     /// ffmpeg's location, looked up when the dialog opens.
     ffmpeg: Option<PathBuf>,
+    /// The last preview; kept while the dialog is closed.
+    preview: Option<Preview>,
 }
 
 fn default_output() -> String {
@@ -241,6 +245,7 @@ impl Default for MovieDialog {
             status: Status::Idle,
             job: None,
             ffmpeg: None,
+            preview: None,
         }
     }
 }
@@ -248,6 +253,69 @@ impl Default for MovieDialog {
 impl MovieDialog {
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Close the dialog. A preview render stops; its frames are kept.
+    fn close(&mut self) {
+        self.open = false;
+        if let Some(p) = &mut self.preview {
+            p.cancel_render();
+        }
+    }
+
+    /// A final render shares the cores: stop a preview render first.
+    fn before_final_render(&mut self) {
+        if let Some(p) = &mut self.preview {
+            p.cancel_render();
+        }
+    }
+
+    /// The settings describe a movie that can be previewed now.
+    fn can_preview(&self, items: &[Bookmark]) -> bool {
+        self.job.is_none()
+            && self
+                .current_spec(items)
+                .is_some_and(|s| s.validate_frames().is_ok())
+    }
+
+    /// Preview `spec` from movie time `t` (the window holding it).
+    fn start_preview(&mut self, spec: &MovieSpec, t: f64, threads: usize, ctx: &egui::Context) {
+        let start = frame_at_time(&preview_spec(spec), t);
+        let ctx = ctx.clone();
+        self.preview
+            .get_or_insert_with(|| Preview::new(spec))
+            .start(spec, start, threads, move || ctx.request_repaint());
+    }
+
+    /// The player, and what its buttons ask for.
+    fn preview_ui(&mut self, ui: &mut egui::Ui, items: &[Bookmark], threads: usize) {
+        let can = self.can_preview(items);
+        let current = self.current_spec(items);
+        let Some(p) = &mut self.preview else { return };
+        ui.separator();
+        let action = p.ui(ui, current.as_ref(), can);
+        let (window_start, window_end, here) = (
+            p.spec().frame_time(p.window.start),
+            p.spec()
+                .frame_time(p.window.end.min(p.spec().frame_count() - 1)),
+            p.playhead_time(),
+        );
+        let t = match action {
+            PlayerAction::None => return,
+            PlayerAction::Discard => {
+                if let Some(p) = &mut self.preview {
+                    p.cancel_render();
+                }
+                self.preview = None;
+                return;
+            }
+            PlayerAction::NextWindow => window_end,
+            PlayerAction::FromHere => here,
+            PlayerAction::Repreview => window_start,
+        };
+        if let Some(spec) = current {
+            self.start_preview(&spec, t, threads, ui.ctx());
+        }
     }
 
     /// Open the dialog starting from the current explorer view.
@@ -509,6 +577,21 @@ impl MovieDialog {
                 } else {
                     let spec = self.current_spec(&bookmarks.items);
                     if ui
+                        .add_enabled(
+                            self.can_preview(&bookmarks.items),
+                            egui::Button::new("Preview"),
+                        )
+                        .on_hover_text("a quick small, choppy render to check the path")
+                        .clicked()
+                        && let Some(spec) = &spec
+                    {
+                        let t = self
+                            .preview
+                            .as_ref()
+                            .map_or(0.0, |p| p.spec().frame_time(p.window.start));
+                        self.start_preview(spec, t, threads, ctx);
+                    }
+                    if ui
                         .add_enabled(spec.is_some(), egui::Button::new("Render"))
                         .clicked()
                         && let Some(spec) = spec
@@ -519,18 +602,22 @@ impl MovieDialog {
                             .validate()
                             .and_then(|()| self.ffmpeg.clone().ok_or(MovieError::FfmpegMissing));
                         match checked {
-                            Ok(ffmpeg) => self.launch(spec, ffmpeg, threads, ctx),
+                            Ok(ffmpeg) => {
+                                self.before_final_render();
+                                self.launch(spec, ffmpeg, threads, ctx)
+                            }
                             Err(e) => self.status = Status::Failed(e.to_string()),
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.open = false;
+                        self.close();
                     }
                 }
             });
+            self.preview_ui(ui, &bookmarks.items, threads);
         });
         if modal.should_close() && !running {
-            self.open = false;
+            self.close();
         }
     }
 
@@ -1058,6 +1145,53 @@ mod tests {
         d.refresh_mode(&[]);
         assert_eq!(d.route, RouteMode::StartEnd);
         assert!(d.current_spec(&[]).is_some());
+    }
+
+    /// A dialog on the dive folder with a preview rendering.
+    fn previewing() -> (MovieDialog, Vec<Bookmark>) {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        let items = dive();
+        d.route = RouteMode::Folder("dive".into());
+        let spec = d.current_spec(&items).unwrap();
+        let mut p = Preview::new(&spec);
+        p.start(&spec, 0, 1, || {});
+        assert!(p.is_rendering());
+        d.preview = Some(p);
+        (d, items)
+    }
+
+    #[test]
+    fn closing_keeps_the_preview() {
+        let (mut d, _) = previewing();
+        d.close();
+        assert!(!d.open);
+        let p = d.preview.as_ref().expect("preview kept");
+        assert!(!p.is_rendering());
+    }
+
+    #[test]
+    fn render_cancels_a_preview_render() {
+        let (mut d, _) = previewing();
+        d.before_final_render();
+        let p = d.preview.as_ref().expect("preview kept");
+        assert!(!p.is_rendering());
+    }
+
+    #[test]
+    fn preview_disabled_without_a_valid_spec() {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        d.route = RouteMode::Folder("dive".into());
+        assert!(d.can_preview(&dive()));
+        let one = vec![filed("top", "dive", mandel(-0.5, 0.0, 3.0, 0.0), 0.0)];
+        assert!(!d.can_preview(&one));
+        let (_tx, rx) = channel();
+        d.job = Some(MovieJob {
+            rx,
+            generation: Arc::new(AtomicU64::new(0)),
+        });
+        assert!(!d.can_preview(&dive()));
     }
 
     #[test]
