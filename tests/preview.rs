@@ -219,3 +219,32 @@ fn preview_job_stops_on_cancel() {
         })
     ));
 }
+
+/// Timing, not a check: `cargo test --release --test preview -- --ignored
+/// --nocapture`. A 10-minute dive from the whole set to 3e-12 at 1080p;
+/// prints how long the first and last 5-minute windows take to preview.
+#[test]
+#[ignore]
+fn time_deep_dive_windows() {
+    let mut f = folder(600.0);
+    f.stops = vec![
+        st(-0.5, 0.0, 3.0, 0.0),
+        st(-0.743643887, 0.131825904, 3e-12, 0.0),
+    ];
+    let p = preview_spec(&f);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    for start in [0, p.frame_count()] {
+        let window = window_at(&p, start);
+        let began = std::time::Instant::now();
+        let msgs = collect(p.clone(), vec![window.clone()], CancelToken::never());
+        assert!(matches!(
+            msgs.last(),
+            Some(PreviewMsg::Finished { result: Ok(()), .. })
+        ));
+        println!(
+            "window {window:?} ({} frames, {threads} threads): {:.1} s",
+            window.len(),
+            began.elapsed().as_secs_f64()
+        );
+    }
+}
