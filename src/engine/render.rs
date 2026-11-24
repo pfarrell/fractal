@@ -60,6 +60,15 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.generation.load(Ordering::Relaxed) != self.mine
     }
+
+    /// A token on the same counter at its current value: past cancels no
+    /// longer count, the next one does.
+    pub fn renewed(&self) -> Self {
+        Self::new(
+            self.generation.clone(),
+            self.generation.load(Ordering::Relaxed),
+        )
+    }
 }
 
 /// How many pixels to compute between cancellation checks. A whole row

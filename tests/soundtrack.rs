@@ -1,6 +1,14 @@
-use fractal_explorer::engine::soundtrack::{filter_graph, mux_args, plan_soundtrack};
+mod common;
+
+use common::*;
+use fractal_explorer::engine::render::CancelToken;
+use fractal_explorer::engine::soundtrack::{
+    add_music, filter_graph, find_ffprobe, mux_args, plan_soundtrack, probe_duration,
+};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
 fn long_track_plays_once() {
@@ -154,4 +162,166 @@ fn mkv_mux_has_no_faststart() {
         Path::new("o.MOV"),
     );
     assert!(mov.iter().any(|x| x == "+faststart"));
+}
+
+#[test]
+fn probe_reads_a_tracks_length() {
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let t = sine(dir.path(), "t.mp3", 2.0);
+    let d = probe_duration(Path::new("ffprobe"), &t).unwrap();
+    assert!((d - 2.0).abs() < 0.1, "{d}");
+}
+
+#[test]
+fn probe_names_a_missing_file() {
+    let e = probe_duration(Path::new("ffprobe"), Path::new("/nope/gone.mp3")).unwrap_err();
+    assert!(e.starts_with("gone.mp3"), "{e}");
+}
+
+#[test]
+fn probe_rejects_file_without_audio() {
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("notes.mp3");
+    std::fs::write(&p, "hello").unwrap();
+    let e = probe_duration(Path::new("ffprobe"), &p).unwrap_err();
+    assert!(e.starts_with("notes.mp3"), "{e}");
+}
+
+#[cfg(unix)]
+#[test]
+fn find_ffprobe_prefers_the_sibling() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["ffmpeg", "ffprobe"] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, "").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert_eq!(
+        find_ffprobe(&dir.path().join("ffmpeg")),
+        Some(dir.path().join("ffprobe"))
+    );
+}
+
+#[test]
+fn renewed_token_ignores_old_cancel() {
+    let g = Arc::new(AtomicU64::new(0));
+    let t = CancelToken::new(g.clone(), 0);
+    g.fetch_add(1, Ordering::Relaxed);
+    assert!(t.is_cancelled());
+    let r = t.renewed();
+    assert!(!r.is_cancelled());
+    g.fetch_add(1, Ordering::Relaxed);
+    assert!(r.is_cancelled());
+}
+
+#[test]
+fn music_is_added_with_video_untouched() {
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let m = video(d, "m.mp4", 3.0);
+    // Two short tracks: the playlist wraps and the crossfade shrinks.
+    let tracks = vec![sine(d, "it's a: track, 1.mp3", 1.5), sine(d, "b.mp3", 1.0)];
+    let secs: Vec<f64> = tracks
+        .iter()
+        .map(|t| probe_duration(Path::new("ffprobe"), t).unwrap())
+        .collect();
+    let before = video_md5(&m);
+    add_music(
+        Path::new("ffmpeg"),
+        Path::new("ffprobe"),
+        &m,
+        &tracks,
+        &secs,
+        &CancelToken::never(),
+    )
+    .unwrap();
+    assert_eq!(stream_types(&m), ["video", "audio"]);
+    let a = stream_secs(&m, "a");
+    assert!((a - 3.0).abs() < 0.1, "audio {a}");
+    assert_eq!(video_md5(&m), before);
+    assert_eq!(names(d), ["b.mp3", "it's a: track, 1.mp3", "m.mp4"]);
+}
+
+#[test]
+fn failed_mux_keeps_silent_movie() {
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let m = video(d, "m.mp4", 1.0);
+    let bad = d.join("notes.mp3");
+    std::fs::write(&bad, "hello").unwrap();
+    let bytes = std::fs::read(&m).unwrap();
+    let r = add_music(
+        Path::new("ffmpeg"),
+        Path::new("ffprobe"),
+        &m,
+        &[bad],
+        &[5.0],
+        &CancelToken::never(),
+    );
+    assert!(r.is_err());
+    assert_eq!(std::fs::read(&m).unwrap(), bytes);
+    assert_eq!(names(d), ["m.mp4", "notes.mp3"]);
+}
+
+#[test]
+fn cancelled_mux_keeps_silent_movie() {
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let m = video(d, "m.mp4", 1.0);
+    let t = sine(d, "t.mp3", 2.0);
+    let bytes = std::fs::read(&m).unwrap();
+    let g = Arc::new(AtomicU64::new(1));
+    let cancelled = CancelToken::new(g, 0);
+    let r = add_music(
+        Path::new("ffmpeg"),
+        Path::new("ffprobe"),
+        &m,
+        &[t],
+        &[2.0],
+        &cancelled,
+    );
+    assert_eq!(r, Err("cancelled".to_string()));
+    assert_eq!(std::fs::read(&m).unwrap(), bytes);
+    assert_eq!(names(d), ["m.mp4", "t.mp3"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn music_keeps_the_movies_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let m = video(d, "m.mp4", 1.0);
+    std::fs::set_permissions(&m, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let t = sine(d, "t.mp3", 2.0);
+    add_music(
+        Path::new("ffmpeg"),
+        Path::new("ffprobe"),
+        &m,
+        &[t],
+        &[2.0],
+        &CancelToken::never(),
+    )
+    .unwrap();
+    let mode = std::fs::metadata(&m).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644, "{mode:o}");
 }

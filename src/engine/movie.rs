@@ -251,19 +251,28 @@ pub fn find_program<'a>(
 }
 
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
 /// How much of ffmpeg's error output to keep.
 const STDERR_TAIL_BYTES: usize = 2048;
+
+/// The last [`STDERR_TAIL_BYTES`] of `err`, cut on a char boundary.
+pub(crate) fn stderr_tail(err: &str) -> &str {
+    let start = err.len().saturating_sub(STDERR_TAIL_BYTES);
+    let start = (start..err.len())
+        .find(|&i| err.is_char_boundary(i))
+        .unwrap_or(err.len());
+    &err[start..]
+}
 
 impl MovieSpec {
     pub fn validate(&self) -> Result<(), MovieError> {
@@ -681,12 +690,8 @@ fn finish(
         // ffmpeg can't succeed without reading every frame, but be sure.
         return wrote.map_err(MovieError::Io);
     }
-    let tail_start = err.len().saturating_sub(STDERR_TAIL_BYTES);
-    let tail_start = (tail_start..err.len())
-        .find(|&i| err.is_char_boundary(i))
-        .unwrap_or(err.len());
     Err(MovieError::Ffmpeg {
         status: status.code(),
-        stderr_tail: err[tail_start..].to_string(),
+        stderr_tail: stderr_tail(&err).to_string(),
     })
 }

@@ -3,8 +3,13 @@
 //! fade in and out, and are trimmed to the movie's length. One ffmpeg pass
 //! adds them with the video stream copied, never re-encoded.
 
+use crate::engine::movie::{FFMPEG_FALLBACK_DIRS, find_program, is_executable, stderr_tail};
+use crate::engine::render::CancelToken;
 use std::ffi::OsString;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Overlap at every join between tracks, in seconds.
 pub const CROSSFADE_S: f64 = 4.0;
@@ -138,4 +143,124 @@ pub fn mux_args(
     }
     args.push(out.as_os_str().to_owned());
     args
+}
+
+/// ffprobe: next to `ffmpeg` if it's there, else on `PATH` or in a usual
+/// install folder.
+pub fn find_ffprobe(ffmpeg: &Path) -> Option<PathBuf> {
+    let file = format!("ffprobe{}", std::env::consts::EXE_SUFFIX);
+    ffmpeg
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.join(&file))
+        .filter(|p| is_executable(p))
+        .or_else(|| {
+            find_program(
+                "ffprobe",
+                std::env::var_os("PATH").as_deref(),
+                FFMPEG_FALLBACK_DIRS.iter().map(Path::new),
+            )
+        })
+}
+
+fn file_label(file: &Path) -> String {
+    file.file_name()
+        .unwrap_or(file.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `file`'s length in seconds. Errors start with the file's name.
+pub fn probe_duration(ffprobe: &Path, file: &Path) -> Result<f64, String> {
+    let name = file_label(file);
+    let out = Command::new(ffprobe)
+        .args(["-v", "error", "-show_entries", "format=duration"])
+        .args(["-of", "default=nw=1:nk=1"])
+        .arg(file)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{name}: can't run ffprobe: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "{name}: can't be read: {}",
+            stderr_tail(err.trim())
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    match text.trim().parse::<f64>() {
+        Ok(d) if positive(d) => Ok(d),
+        _ => Err(format!("{name}: has no length ffprobe can read")),
+    }
+}
+
+/// Add the tracks (lengths `track_secs`) to the finished movie `video`,
+/// replacing it. On any error, including `Err("cancelled")`, `video` is
+/// left as it was and nothing else is left behind.
+pub fn add_music(
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    video: &Path,
+    tracks: &[PathBuf],
+    track_secs: &[f64],
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let length = probe_duration(ffprobe, video)?;
+    let plan = plan_soundtrack(track_secs, length)?;
+    let io = |e: std::io::Error| format!("file error: {e}");
+    let mut script = tempfile::NamedTempFile::new().map_err(io)?;
+    script
+        .write_all(filter_graph(&plan).as_bytes())
+        .and_then(|()| script.flush())
+        .map_err(io)?;
+    let dir = match video.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let ext = video
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let out = tempfile::Builder::new()
+        .prefix(".fractal-music-")
+        .suffix(&ext)
+        .tempfile_in(dir)
+        .map_err(io)?;
+    let mut child = Command::new(ffmpeg)
+        .args(mux_args(video, tracks, &plan, script.path(), out.path()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("can't run ffmpeg: {e}"))?;
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    let status = loop {
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled".into());
+        }
+        if let Some(status) = child.try_wait().map_err(io)? {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let err = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!(
+            "ffmpeg failed (exit {:?}):\n{}",
+            status.code(),
+            stderr_tail(&err)
+        ));
+    }
+    // The temp file is private (0600); the movie keeps its own permissions.
+    let perms = std::fs::metadata(video).map_err(io)?.permissions();
+    std::fs::set_permissions(out.path(), perms).map_err(io)?;
+    out.persist(video).map_err(|e| io(e.error))?;
+    Ok(())
 }
