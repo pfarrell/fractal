@@ -45,6 +45,8 @@ pub struct Preview {
     pub error: Option<String>,
     /// The frame on screen and its texture.
     texture: Option<(usize, egui::TextureHandle)>,
+    /// Which frame data the texture holds: (index, data address).
+    shown: Option<(usize, usize)>,
 }
 
 /// What the player asks the dialog to do (it needs the current settings).
@@ -89,6 +91,7 @@ impl Preview {
             progress: (0, 0),
             error: None,
             texture: None,
+            shown: None,
         }
     }
 
@@ -254,6 +257,23 @@ impl Preview {
 }
 
 impl Preview {
+    /// The playhead's frame, if the texture doesn't hold it yet.
+    fn frame_to_upload(&self) -> Option<Arc<[u8]>> {
+        let rgb = self.frame_rgb(self.playhead)?;
+        let key = (self.playhead, Arc::as_ptr(rgb) as *const u8 as usize);
+        (self.shown != Some(key)).then(|| rgb.clone())
+    }
+
+    /// The texture now holds `rgb` for the playhead.
+    fn mark_uploaded(&mut self, rgb: &Arc<[u8]>) {
+        self.shown = Some((self.playhead, Arc::as_ptr(rgb) as *const u8 as usize));
+    }
+
+    /// Runs of rendered frames in the window.
+    fn rendered_runs(&self) -> Vec<Range<usize>> {
+        runs_to_render(self.window.clone(), |i| self.frame_rgb(i).is_none())
+    }
+
     /// Movie time of the playhead.
     pub fn playhead_time(&self) -> f64 {
         self.spec.frame_time(self.playhead)
@@ -360,12 +380,7 @@ impl Preview {
         let (w, h) = (self.spec.width, self.spec.height);
         let width = ui.available_width();
         let size = egui::vec2(width, width * h as f32 / w as f32);
-        if let Some(rgb) = self.frame_rgb(self.playhead).cloned()
-            && self
-                .texture
-                .as_ref()
-                .is_none_or(|(i, _)| *i != self.playhead)
-        {
+        if let Some(rgb) = self.frame_to_upload() {
             let image = egui::ColorImage::from_rgb([w, h], &rgb);
             match &mut self.texture {
                 Some((i, t)) if t.size() == [w, h] => {
@@ -379,6 +394,7 @@ impl Preview {
                     self.texture = Some((self.playhead, t));
                 }
             }
+            self.mark_uploaded(&rgb);
         }
         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         let painter = ui.painter_at(rect);
@@ -430,17 +446,8 @@ impl Preview {
                 WINDOW,
             );
         }
-        let mut run: Option<usize> = None;
-        for i in self.window.clone().chain(std::iter::once(usize::MAX)) {
-            let have = i != usize::MAX && self.frame_rgb(i).is_some();
-            match (run, have) {
-                (None, true) => run = Some(i),
-                (Some(a), false) => {
-                    painter.rect_filled(span_rect(a, i - 1), 0.0, RENDERED);
-                    run = None;
-                }
-                _ => {}
-            }
+        for run in self.rendered_runs() {
+            painter.rect_filled(span_rect(run.start, run.end - 1), 0.0, RENDERED);
         }
         let route = self.spec.route();
         for (k, t) in route.step_times().iter().enumerate() {
@@ -624,6 +631,33 @@ mod tests {
         assert!(!p.is_stale(Some(&moved)));
         assert!(p.is_stale(Some(&final_spec(21.0))));
         assert!(p.is_stale(None));
+    }
+
+    #[test]
+    fn a_rerendered_frame_at_the_playhead_is_uploaded_again() {
+        let f = final_spec(100.0 / 12.0);
+        let mut p = Preview::new(&f);
+        p.prepare(&f, 0);
+        insert(&mut p, 5);
+        p.playhead = 5;
+        let first = p.frame_to_upload().expect("new frame");
+        p.mark_uploaded(&first);
+        assert!(p.frame_to_upload().is_none());
+        // Re-preview with a changed turn: frame 5 comes back re-rendered.
+        let mut g = f.clone();
+        g.stops[1].rotation = 0.0;
+        p.prepare(&g, 0);
+        insert(&mut p, 5);
+        assert!(p.frame_to_upload().is_some(), "stale picture kept");
+    }
+
+    #[test]
+    fn rendered_runs_stay_inside_the_window() {
+        let mut p = with_frames(0..0);
+        for i in [3, 4, 5, 9, 98, 99] {
+            insert(&mut p, i);
+        }
+        assert_eq!(p.rendered_runs(), vec![3..6, 9..10, 98..100]);
     }
 
     #[test]
