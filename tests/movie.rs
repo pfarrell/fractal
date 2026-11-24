@@ -4,7 +4,7 @@ use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, plan};
 use fractal_explorer::engine::movie::{
     Kept, MovieError, MovieProgress, MovieSpec, RotatedSampler, ffmpeg_args, ffmpeg_install_hint,
-    find_program, render_exact_frame, render_movie, rotated_point,
+    find_program, render_exact_frame, render_movie, render_range, rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
 use fractal_explorer::engine::route::Stop;
@@ -897,4 +897,97 @@ fn spin_in_place_is_a_valid_movie() {
     }
     let last = sp.frame_angle(sp.frame_count() - 1);
     assert!((last - 100f64.to_radians()).abs() < 1e-9, "{last}");
+}
+
+fn range_pool() -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap()
+}
+
+fn small(quality: Quality, frames: u32) -> MovieSpec {
+    let mut sp = spec(PathBuf::from("/tmp/unused.mp4"));
+    (sp.fps, sp.seconds, sp.width, sp.height, sp.quality) = (frames, 1.0, 64, 48, quality);
+    sp
+}
+
+#[test]
+fn render_range_exact_matches_single_frames() {
+    let sp = small(Quality::Exact, 12);
+    let pool = range_pool();
+    let mut got = Vec::new();
+    render_range(
+        &sp,
+        5..9,
+        &pool,
+        &CancelToken::never(),
+        &mut |i, px| {
+            got.push((i, px.to_vec()));
+            true
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        got.iter().map(|g| g.0).collect::<Vec<_>>(),
+        vec![5, 6, 7, 8]
+    );
+    for (i, px) in got {
+        let mut want = vec![[0u8; 4]; 64 * 48];
+        render_exact_frame(&sp, i, &pool, &CancelToken::never(), &mut want).unwrap();
+        assert_eq!(px, want, "frame {i}");
+    }
+}
+
+#[test]
+fn render_range_fast_visits_each_frame_once() {
+    let sp = small(Quality::Fast, 60);
+    let mut seen = Vec::new();
+    let mut last = None;
+    render_range(
+        &sp,
+        10..50,
+        &range_pool(),
+        &CancelToken::never(),
+        &mut |i, _| {
+            seen.push(i);
+            true
+        },
+        &mut |p| {
+            if let MovieProgress::Frame { done, total, .. } = p {
+                last = Some((done, total));
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(seen, (10..50).collect::<Vec<_>>());
+    assert_eq!(last, Some((40, 40)));
+}
+
+#[test]
+fn render_range_stops_when_sink_says_so() {
+    let sp = small(Quality::Fast, 30);
+    let mut calls = 0;
+    let r = render_range(
+        &sp,
+        0..30,
+        &range_pool(),
+        &CancelToken::never(),
+        &mut |_, _| {
+            calls += 1;
+            calls < 3
+        },
+        &mut |_| {},
+    );
+    assert!(r.is_ok());
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn validate_frames_ignores_output() {
+    let mut sp = small(Quality::Fast, 12);
+    sp.output = PathBuf::from("/no/such/dir/x.mp4");
+    assert!(sp.validate_frames().is_ok());
+    assert!(sp.validate().is_err());
 }

@@ -23,7 +23,7 @@
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate};
 use crate::engine::keyframe::{
-    Block, KEYFRAME_MAX_PIXELS, Quality, frame_work, keyframe_work, plan, planned_work,
+    Block, KEYFRAME_MAX_PIXELS, Quality, frame_work, keyframe_work, plan_range, planned_work,
     render_keyframe, resample,
 };
 use crate::engine::render::{CancelToken, Sampler, render};
@@ -33,6 +33,7 @@ use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -229,7 +230,15 @@ fn is_executable(p: &Path) -> bool {
 const STDERR_TAIL_BYTES: usize = 2048;
 
 impl MovieSpec {
+    /// Everything [`Self::validate_frames`] checks, plus the output path.
     pub fn validate(&self) -> Result<(), MovieError> {
+        self.validate_frames()?;
+        self.validate_output()
+    }
+
+    /// The route, size, rate and duration are renderable (the output path
+    /// is not checked: a preview has none).
+    pub fn validate_frames(&self) -> Result<(), MovieError> {
         let bad = |why: &str| Err(MovieError::Invalid(why.into()));
         if self.width < 16 || self.height < 16 || self.width % 2 == 1 || self.height % 2 == 1 {
             return bad("width and height must be even and at least 16");
@@ -274,7 +283,7 @@ impl MovieSpec {
                 }));
             }
         }
-        self.validate_output()
+        Ok(())
     }
 
     /// Catch a bad output path before spending minutes rendering frames.
@@ -512,34 +521,64 @@ fn render_frames(
     sent: &mut usize,
     progress: &mut dyn FnMut(MovieProgress),
 ) -> Result<(), MovieError> {
-    let total = spec.frame_count();
+    let mut to_ffmpeg = |_: usize, pixels: &[[u8; 4]]| {
+        // A failed send means the writer stopped: ffmpeg exited early, and
+        // `finish` reports why.
+        let ok = tx.send(pixels.as_flattened().to_vec()).is_ok();
+        if ok {
+            *sent += 1;
+        }
+        ok
+    };
+    render_range(
+        spec,
+        0..spec.frame_count(),
+        pool,
+        cancel,
+        &mut to_ffmpeg,
+        progress,
+    )
+}
+
+/// Render the frames in `frames`, in order, handing each to `sink` with
+/// its index. `sink` returning false stops the render (`Ok`). Progress
+/// counts frames and planned work within `frames`.
+pub fn render_range(
+    spec: &MovieSpec,
+    frames: Range<usize>,
+    pool: &rayon::ThreadPool,
+    cancel: &CancelToken,
+    sink: &mut dyn FnMut(usize, &[[u8; 4]]) -> bool,
+    progress: &mut dyn FnMut(MovieProgress),
+) -> Result<(), MovieError> {
+    let total = frames.len();
     let cancelled = || MovieError::Cancelled { kept: None };
     let mut pixels = vec![[0u8; 4]; spec.width * spec.height];
     let started = Instant::now();
     let elapsed_ms = || started.elapsed().as_millis() as u64;
+    let mut done = 0;
     let Some(q) = spec.quality.q() else {
         let px = (spec.width * spec.height) as f64;
-        for i in 0..total {
+        for i in frames {
             if cancel.is_cancelled() {
                 return Err(cancelled());
             }
             render_exact_frame(spec, i, pool, cancel, &mut pixels)?;
-            if tx.send(pixels.as_flattened().to_vec()).is_err() {
-                // The writer stopped: ffmpeg exited early. `finish` reports why.
+            if !sink(i, &pixels) {
                 return Ok(());
             }
-            *sent += 1;
+            done += 1;
             progress(MovieProgress::Frame {
-                done: i + 1,
+                done,
                 total,
-                work: ((i + 1) as f64 * px, total as f64 * px),
+                work: (done as f64 * px, total as f64 * px),
                 elapsed_ms: elapsed_ms(),
             });
         }
         return Ok(());
     };
 
-    let blocks = plan(spec, q, KEYFRAME_MAX_PIXELS);
+    let blocks = plan_range(spec, frames, q, KEYFRAME_MAX_PIXELS);
     let keyframes = blocks
         .iter()
         .filter(|b| matches!(b, Block::Keyframe(_)))
@@ -584,13 +623,13 @@ fn render_frames(
                     );
                 }
             }
-            if tx.send(pixels.as_flattened().to_vec()).is_err() {
+            if !sink(i, &pixels) {
                 return Ok(());
             }
-            *sent += 1;
+            done += 1;
             work_done += frame_work(spec, block, i);
             progress(MovieProgress::Frame {
-                done: i + 1,
+                done,
                 total,
                 work: (work_done, work_total),
                 elapsed_ms: elapsed_ms(),
