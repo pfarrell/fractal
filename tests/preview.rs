@@ -1,3 +1,4 @@
+#![allow(clippy::single_range_in_vec_init)] // runs of frames are lists of ranges
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::keyframe::Quality;
@@ -56,7 +57,7 @@ fn preview_size_fits_the_box() {
     ] {
         let got = preview_size(w, h);
         assert_eq!(got, want, "{w}×{h}");
-        assert!(got.0 % 2 == 0 && got.1 % 2 == 0);
+        assert!(got.0.is_multiple_of(2) && got.1.is_multiple_of(2));
     }
 }
 
