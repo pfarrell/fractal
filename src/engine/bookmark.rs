@@ -3,6 +3,7 @@
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::ifs::IfsSystem;
+use crate::engine::route::{Stop, step_length};
 use crate::engine::viewport::MaxIter;
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -27,10 +28,109 @@ pub enum BookmarkView {
     },
 }
 
+impl BookmarkView {
+    /// Height of the view in the complex plane.
+    pub fn span(&self) -> f64 {
+        match self {
+            BookmarkView::Escape { span, .. } | BookmarkView::Ifs { span, .. } => *span,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bookmark {
     pub name: String,
     pub view: BookmarkView,
+    /// The folder this bookmark is filed in; `None` = unfiled.
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// °/s the picture turns on the step arriving here when its folder
+    /// plays as a path. Unused on the folder's shallowest bookmark.
+    #[serde(default)]
+    pub rotation: f64,
+}
+
+/// Distinct folder names, alphabetical.
+pub fn folders(items: &[Bookmark]) -> Vec<String> {
+    let mut names: Vec<String> = items.iter().filter_map(|b| b.folder.clone()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Indices of the bookmarks in `folder` (`None` = unfiled), shallowest
+/// (largest span) first, ties by name. This is the order a folder plays in.
+pub fn folder_order(items: &[Bookmark], folder: Option<&str>) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].folder.as_deref() == folder)
+        .collect();
+    idx.sort_by(|&a, &b| {
+        items[b]
+            .view
+            .span()
+            .total_cmp(&items[a].view.span())
+            .then_with(|| items[a].name.cmp(&items[b].name))
+    });
+    idx
+}
+
+/// A folder played as a movie route.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FolderPath {
+    /// The fractal, iterations and colors of the shallowest stop.
+    pub kind: FractalKind,
+    pub max_iter: MaxIter,
+    pub color: ColorSettings,
+    /// (bookmark index, stop) in path order; each stop's rotation is its
+    /// bookmark's.
+    pub stops: Vec<(usize, Stop)>,
+    /// Bookmarks left out: IFS, or a different fractal from the first stop.
+    pub skipped: usize,
+}
+
+/// `folder` as a route, or `None` if it holds no escape-time bookmark.
+/// A bookmark with the same view as the stop before it is dropped.
+pub fn folder_path(items: &[Bookmark], folder: &str) -> Option<FolderPath> {
+    let order = folder_order(items, Some(folder));
+    let mut path: Option<FolderPath> = None;
+    let mut skipped = 0;
+    for i in order {
+        let BookmarkView::Escape {
+            kind,
+            center,
+            span,
+            max_iter,
+            color,
+        } = items[i].view
+        else {
+            skipped += 1;
+            continue;
+        };
+        let stop = Stop {
+            center,
+            span,
+            rotation: items[i].rotation,
+        };
+        match &mut path {
+            None => {
+                path = Some(FolderPath {
+                    kind,
+                    max_iter,
+                    color,
+                    stops: vec![(i, stop)],
+                    skipped: 0,
+                })
+            }
+            Some(p) if p.kind != kind => skipped += 1,
+            Some(p) => {
+                let prev = &p.stops.last().expect("first stop pushed").1;
+                if step_length(prev, &stop) > 0.0 {
+                    p.stops.push((i, stop));
+                }
+            }
+        }
+    }
+    path.map(|p| FolderPath { skipped, ..p })
 }
 
 #[derive(Debug)]
@@ -126,6 +226,8 @@ mod tests {
     fn samples() -> Vec<Bookmark> {
         vec![
             Bookmark {
+                folder: Some("dive".into()),
+                rotation: 7.5,
                 name: "seahorse".into(),
                 view: BookmarkView::Escape {
                     kind: FractalKind::Mandelbrot,
@@ -136,6 +238,8 @@ mod tests {
                 },
             },
             Bookmark {
+                folder: None,
+                rotation: 0.0,
                 name: "fern".into(),
                 view: BookmarkView::Ifs {
                     system: IfsSystem::barnsley_fern(),
@@ -208,5 +312,106 @@ mod tests {
         assert!(!path.exists());
         assert!(dir.path().join("bookmarks.json.bad").exists());
         assert!(store.load().unwrap().is_empty());
+    }
+
+    fn esc(name: &str, folder: Option<&str>, kind: FractalKind, re: f64, span: f64) -> Bookmark {
+        Bookmark {
+            name: name.into(),
+            view: BookmarkView::Escape {
+                kind,
+                center: Complex64::new(re, 0.1),
+                span,
+                max_iter: MaxIter::Auto,
+                color: ColorSettings::default(),
+            },
+            folder: folder.map(String::from),
+            rotation: span.log10(),
+        }
+    }
+
+    fn m(name: &str, folder: Option<&str>, re: f64, span: f64) -> Bookmark {
+        esc(name, folder, FractalKind::Mandelbrot, re, span)
+    }
+
+    #[test]
+    fn old_format_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bookmarks.json");
+        let old: Vec<serde_json::Value> = samples()
+            .iter()
+            .map(|b| serde_json::json!({ "name": b.name, "view": b.view }))
+            .collect();
+        std::fs::write(&path, serde_json::to_string(&old).unwrap()).unwrap();
+        let items = BookmarkStore::new(path).load().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|b| b.folder.is_none() && b.rotation == 0.0)
+        );
+    }
+
+    #[test]
+    fn folder_order_is_shallowest_first_then_name() {
+        let items = vec![
+            m("b", Some("dive"), -0.7, 1e-3),
+            m("z", Some("dive"), -0.5, 3.0),
+            m("loose", None, -0.5, 10.0),
+            m("a", Some("dive"), -0.71, 1e-3),
+        ];
+        let names: Vec<&str> = folder_order(&items, Some("dive"))
+            .into_iter()
+            .map(|i| items[i].name.as_str())
+            .collect();
+        assert_eq!(names, ["z", "a", "b"]);
+        assert_eq!(folder_order(&items, None), [2]);
+    }
+
+    #[test]
+    fn folders_are_distinct_and_sorted() {
+        let items = vec![
+            m("1", Some("zeta"), -0.5, 1.0),
+            m("2", None, -0.5, 1.0),
+            m("3", Some("alpha"), -0.5, 0.1),
+            m("4", Some("zeta"), -0.5, 0.01),
+        ];
+        assert_eq!(folders(&items), ["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn folder_path_skips_other_fractals_and_ifs() {
+        let julia = FractalKind::Julia {
+            c: Complex64::new(-0.8, 0.156),
+        };
+        let mut ifs = samples()[1].clone();
+        ifs.folder = Some("dive".into());
+        let items = vec![
+            m("mid", Some("dive"), -0.74, 0.01),
+            esc("j", Some("dive"), julia, 0.0, 1.0),
+            m("top", Some("dive"), -0.5, 3.0),
+            ifs,
+            m("deep", Some("dive"), -0.743, 1e-5),
+            m("elsewhere", Some("other"), -0.5, 2.0),
+        ];
+        let p = folder_path(&items, "dive").unwrap();
+        assert_eq!(p.kind, FractalKind::Mandelbrot);
+        assert_eq!(p.skipped, 2);
+        let idx: Vec<usize> = p.stops.iter().map(|(i, _)| *i).collect();
+        assert_eq!(idx, [2, 0, 4]);
+        assert_eq!(p.stops[2].1.rotation, items[4].rotation);
+        assert_eq!(p.stops[0].1.span, 3.0);
+        assert!(folder_path(&items, "nothing").is_none());
+    }
+
+    #[test]
+    fn folder_path_drops_duplicate_stops() {
+        let items = vec![
+            m("top", Some("dive"), -0.5, 3.0),
+            m("one", Some("dive"), -0.74, 0.01),
+            m("two", Some("dive"), -0.74, 0.01),
+        ];
+        let p = folder_path(&items, "dive").unwrap();
+        assert_eq!(p.stops.len(), 2);
+        assert_eq!(p.skipped, 0);
     }
 }

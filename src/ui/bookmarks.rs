@@ -43,7 +43,12 @@ impl BookmarksUi {
 
     /// Add a bookmark and save. A non-saveable bookmark is not kept.
     pub fn add(&mut self, name: String, view: BookmarkView) {
-        self.items.push(Bookmark { name, view });
+        self.items.push(Bookmark {
+            name,
+            view,
+            folder: None,
+            rotation: 0.0,
+        });
         match self.store.save(&self.items) {
             Ok(()) => self.save_error = None,
             Err(e) => {
