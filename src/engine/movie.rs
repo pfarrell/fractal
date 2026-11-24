@@ -318,7 +318,7 @@ impl MovieSpec {
     }
 
     /// Movie time of frame `i`, in seconds.
-    fn frame_time(&self, i: usize) -> f64 {
+    pub fn frame_time(&self, i: usize) -> f64 {
         i as f64 / (self.frame_count() - 1) as f64 * self.seconds
     }
 

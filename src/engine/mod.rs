@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod keyframe;
 pub mod movie;
 pub mod newton;
+pub mod preview;
 pub mod render;
 pub mod route;
 pub mod viewport;
