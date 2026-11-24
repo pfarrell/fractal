@@ -252,8 +252,7 @@ impl FractalApp {
     fn escape_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.receive(ctx);
         let movie_was_open = self.movie.is_open();
-        self.movie
-            .show(ctx, self.max_threads, &self.bookmarks.items);
+        self.movie.show(ctx, self.max_threads, &mut self.bookmarks);
         if movie_was_open && !self.movie.is_open() {
             self.needs_render = true; // the dialog cancelled the live renders
         }

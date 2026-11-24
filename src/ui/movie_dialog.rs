@@ -1,13 +1,14 @@
 //! Modal dialog for exporting a zoom movie.
 
-use crate::engine::bookmark::{Bookmark, BookmarkView};
+use crate::engine::bookmark::{Bookmark, BookmarkView, FolderPath, folder_path, folders};
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie};
 use crate::engine::render::CancelToken;
-use crate::engine::route::Stop;
+use crate::engine::route::{Stop, outside_previous};
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
+use crate::ui::bookmarks::BookmarksUi;
 use eframe::egui;
 use num_complex::Complex64;
 use std::path::PathBuf;
@@ -135,6 +136,9 @@ fn compute_estimate(spec: &MovieSpec) -> Estimate {
     }
 }
 
+const NEEDS_TWO_STOPS: &str = "this folder needs at least two bookmarks of the same fractal";
+const SWINGS_ACROSS: &str = "this stop isn't inside the one before — the camera will swing across";
+
 const RESOLUTIONS: [(usize, usize); 3] = [(1280, 720), (1920, 1080), (854, 480)];
 
 impl MovieStart {
@@ -159,8 +163,19 @@ impl MovieStart {
     }
 }
 
+/// What the movie flies through.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum RouteMode {
+    /// From the start view to the end view.
+    #[default]
+    StartEnd,
+    /// Through a bookmark folder's bookmarks, shallowest to deepest.
+    Folder(String),
+}
+
 pub struct MovieDialog {
     open: bool,
+    route: RouteMode,
     /// The explorer's view when the dialog opened.
     current: Option<MovieStart>,
     /// Where the movie starts: `current` or a bookmark.
@@ -206,6 +221,7 @@ impl Default for MovieDialog {
     fn default() -> Self {
         Self {
             open: false,
+            route: RouteMode::StartEnd,
             current: None,
             start: None,
             start_name: None,
@@ -260,11 +276,13 @@ impl MovieDialog {
     }
 
     /// Duration, frame count, and zoom speed, under the duration slider.
-    fn pace_text(&self) -> String {
+    fn pace_text(&self, spec: Option<&MovieSpec>) -> String {
         let frames = (self.fps as f64 * self.seconds).round().max(2.0);
         let mut text = format!("{} · {frames:.0} frames", format_duration(self.seconds));
-        if let Some(start) = &self.start {
-            let total = start.view.span / (DEFAULT_SPAN / self.end_magnification);
+        if let Some(spec) = spec
+            && let (Some(first), Some(last)) = (spec.stops.first(), spec.stops.last())
+        {
+            let total = first.span / last.span;
             if total > 1.0 {
                 let rate = zoom_per_second(total, self.seconds);
                 text += &format!(" · zooms ×{rate:.3} per second");
@@ -299,10 +317,45 @@ impl MovieDialog {
         }
     }
 
+    /// The movie along a folder's path, with this dialog's frame settings.
+    fn folder_spec(&self, path: &FolderPath) -> MovieSpec {
+        MovieSpec {
+            kind: path.kind,
+            stops: path.stops.iter().map(|(_, s)| *s).collect(),
+            fps: self.fps,
+            seconds: self.seconds,
+            width: self.width,
+            height: self.height,
+            max_iter: path.max_iter,
+            color: path.color,
+            output: PathBuf::from(&self.output),
+            quality: self.quality,
+        }
+    }
+
+    /// The movie the current settings describe; `None` when a folder has
+    /// fewer than two usable stops (or the dialog was never opened).
+    fn current_spec(&self, items: &[Bookmark]) -> Option<MovieSpec> {
+        match &self.route {
+            RouteMode::StartEnd => self.start.map(|start| self.spec(&start)),
+            RouteMode::Folder(f) => folder_path(items, f)
+                .filter(|p| p.stops.len() >= 2)
+                .map(|p| self.folder_spec(&p)),
+        }
+    }
+
+    /// Go back to Start → End if the chosen folder no longer exists.
+    fn refresh_mode(&mut self, items: &[Bookmark]) {
+        if let RouteMode::Folder(f) = &self.route
+            && !folders(items).contains(f)
+        {
+            self.route = RouteMode::StartEnd;
+        }
+    }
+
     /// Cost and memory fit of the current settings; the planner walks every
     /// frame, so it only reruns when a setting changes.
-    fn estimate(&mut self, start: &MovieStart) -> Estimate {
-        let spec = self.spec(start);
+    fn estimate(&mut self, spec: &MovieSpec) -> Estimate {
         let key = EstimateKey {
             kind: spec.kind,
             stops: spec.stops.clone(),
@@ -321,7 +374,7 @@ impl MovieDialog {
         {
             self.estimate_runs += 1;
         }
-        let e = compute_estimate(&spec);
+        let e = compute_estimate(spec);
         self.estimate = Some((key, e));
         e
     }
@@ -397,32 +450,45 @@ impl MovieDialog {
     }
 
     /// Show the dialog (if open). `threads` = cores to render with.
-    pub fn show(&mut self, ctx: &egui::Context, threads: usize, bookmarks: &[Bookmark]) {
+    pub fn show(&mut self, ctx: &egui::Context, threads: usize, bookmarks: &mut BookmarksUi) {
         if !self.open {
             return;
         }
         self.receive();
+        self.refresh_mode(&bookmarks.items);
         let Some(start) = self.start else { return };
         let running = self.job.is_some();
 
         let modal = egui::Modal::new(egui::Id::unique("movie_dialog")).show(ctx, |ui| {
             ui.set_width(420.0);
             ui.heading("Export zoom movie");
-            ui.label(format!(
-                "Start ({}): {} at {:+.6} {:+.6}i, zoom {:.2e}",
-                self.start_name.as_deref().unwrap_or("current view"),
-                start.kind.label(),
-                start.view.center.re,
-                start.view.center.im,
-                start.view.magnification()
-            ));
-            ui.small(
-                "The movie zooms from the start view to the end view, straight in \
-                 or circling the target (Path), optionally turning (Rotation). The \
-                 start also sets the fractal, colors and iterations; the end only \
-                 sets where to zoom to and how deep.",
-            );
-            ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks, &start));
+            match &self.route {
+                RouteMode::StartEnd => {
+                    ui.label(format!(
+                        "Start ({}): {} at {:+.6} {:+.6}i, zoom {:.2e}",
+                        self.start_name.as_deref().unwrap_or("current view"),
+                        start.kind.label(),
+                        start.view.center.re,
+                        start.view.center.im,
+                        start.view.magnification()
+                    ));
+                    ui.small(
+                        "The movie zooms from the start view to the end view, \
+                         optionally turning (Rotation). The start also sets the \
+                         fractal, colors and iterations; the end only sets where to \
+                         zoom to and how deep.",
+                    );
+                }
+                RouteMode::Folder(f) => {
+                    ui.label(format!("Path: folder {f}"));
+                    ui.small(
+                        "The movie flies through the folder's bookmarks from \
+                         shallowest to deepest, turning on each step as set below. \
+                         The first bookmark sets the fractal, colors and iterations.",
+                    );
+                }
+            }
+            ui.add_enabled_ui(!running, |ui| self.settings(ui, bookmarks));
             ui.separator();
             if self.ffmpeg.is_none() && !matches!(self.status, Status::Failed(_)) {
                 ui.colored_label(WARNING, MovieError::FfmpegMissing.to_string());
@@ -436,10 +502,14 @@ impl MovieDialog {
                         job.generation.fetch_add(1, Ordering::Relaxed);
                     }
                 } else {
-                    if ui.button("Render").clicked() {
+                    let spec = self.current_spec(&bookmarks.items);
+                    if ui
+                        .add_enabled(spec.is_some(), egui::Button::new("Render"))
+                        .clicked()
+                        && let Some(spec) = spec
+                    {
                         // Look again: ffmpeg may have been installed meanwhile.
                         self.ffmpeg = find_ffmpeg();
-                        let spec = self.spec(&start);
                         let checked = spec
                             .validate()
                             .and_then(|()| self.ffmpeg.clone().ok_or(MovieError::FfmpegMissing));
@@ -459,65 +529,17 @@ impl MovieDialog {
         }
     }
 
-    fn settings(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark], start: &MovieStart) {
+    fn settings(&mut self, ui: &mut egui::Ui, bookmarks: &mut BookmarksUi) {
         egui::Grid::new("movie_settings")
             .num_columns(2)
             .show(ui, |ui| {
-                let targets: Vec<(&str, Complex64, f64)> = bookmarks
-                    .iter()
-                    .filter_map(|b| match b.view {
-                        BookmarkView::Escape { center, span, .. } => {
-                            Some((b.name.as_str(), center, span))
-                        }
-                        BookmarkView::Ifs { .. } => None,
-                    })
-                    .collect();
-                self.start_picker(ui, bookmarks);
-                if !targets.is_empty() {
-                    ui.label("End from bookmark");
-                    egui::ComboBox::from_id_salt("movie_bookmark")
-                        .selected_text("choose…")
-                        .show_ui(ui, |ui| {
-                            for (name, center, span) in &targets {
-                                if ui.selectable_label(false, *name).clicked() {
-                                    self.set_target(*center, DEFAULT_SPAN / span);
-                                }
-                            }
-                        });
-                    ui.end_row();
+                self.route_picker(ui, &bookmarks.items);
+                if let RouteMode::Folder(f) = &self.route {
+                    let f = f.clone();
+                    self.folder_rows(ui, bookmarks, &f);
+                } else {
+                    self.start_end_rows(ui, &bookmarks.items);
                 }
-                ui.label("End center");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.target.re)
-                            .speed(1e-6)
-                            .max_decimals(15),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut self.target.im)
-                            .speed(1e-6)
-                            .max_decimals(15),
-                    );
-                    ui.label("i");
-                });
-                ui.end_row();
-                if let Some(p) = self.orbit_point {
-                    ui.label("");
-                    if ui.button("Center end on orbit point").clicked() {
-                        self.target = p;
-                    }
-                    ui.end_row();
-                }
-                ui.label("End zoom");
-                let floor_mag = DEFAULT_SPAN / (min_pixel_scale(self.target) * self.height as f64);
-                ui.add(
-                    egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag)
-                        .logarithmic(true),
-                );
-                ui.end_row();
-                ui.label("");
-                ui.small(format!("precision limit here ≈ {floor_mag:.1e}"));
-                ui.end_row();
                 ui.label("Frame rate");
                 egui::ComboBox::from_id_salt("fps")
                     .selected_text(format!("{} fps", self.fps))
@@ -536,11 +558,13 @@ impl MovieDialog {
                 );
                 ui.end_row();
                 ui.label("");
-                ui.small(self.pace_text());
+                ui.small(self.pace_text(self.current_spec(&bookmarks.items).as_ref()));
                 ui.end_row();
-                ui.label("Rotation");
-                ui.add(egui::Slider::new(&mut self.rotation, -30.0..=30.0).suffix(" °/s"));
-                ui.end_row();
+                if self.route == RouteMode::StartEnd {
+                    ui.label("Rotation");
+                    ui.add(egui::Slider::new(&mut self.rotation, -30.0..=30.0).suffix(" °/s"));
+                    ui.end_row();
+                }
                 ui.label("Quality");
                 egui::ComboBox::from_id_salt("movie_quality")
                     .selected_text(self.quality.label())
@@ -550,8 +574,10 @@ impl MovieDialog {
                         }
                     });
                 ui.end_row();
-                if self.quality != Quality::Exact {
-                    let estimate = self.estimate(start);
+                if self.quality != Quality::Exact
+                    && let Some(spec) = self.current_spec(&bookmarks.items)
+                {
+                    let estimate = self.estimate(&spec);
                     ui.label("");
                     ui.vertical(|ui| {
                         ui.small(cost_text(estimate.cost));
@@ -587,6 +613,136 @@ impl MovieDialog {
                 ui.text_edit_singleline(&mut self.output);
                 ui.end_row();
             });
+    }
+
+    /// Start, end and their helpers (Start → End mode).
+    fn start_end_rows(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark]) {
+        let targets: Vec<(&str, Complex64, f64)> = bookmarks
+            .iter()
+            .filter_map(|b| match b.view {
+                BookmarkView::Escape { center, span, .. } => Some((b.name.as_str(), center, span)),
+                BookmarkView::Ifs { .. } => None,
+            })
+            .collect();
+        self.start_picker(ui, bookmarks);
+        if !targets.is_empty() {
+            ui.label("End from bookmark");
+            egui::ComboBox::from_id_salt("movie_bookmark")
+                .selected_text("choose…")
+                .show_ui(ui, |ui| {
+                    for (name, center, span) in &targets {
+                        if ui.selectable_label(false, *name).clicked() {
+                            self.set_target(*center, DEFAULT_SPAN / span);
+                        }
+                    }
+                });
+            ui.end_row();
+        }
+        ui.label("End center");
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::DragValue::new(&mut self.target.re)
+                    .speed(1e-6)
+                    .max_decimals(15),
+            );
+            ui.add(
+                egui::DragValue::new(&mut self.target.im)
+                    .speed(1e-6)
+                    .max_decimals(15),
+            );
+            ui.label("i");
+        });
+        ui.end_row();
+        if let Some(p) = self.orbit_point {
+            ui.label("");
+            if ui.button("Center end on orbit point").clicked() {
+                self.target = p;
+            }
+            ui.end_row();
+        }
+        ui.label("End zoom");
+        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(self.target) * self.height as f64);
+        ui.add(egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag).logarithmic(true));
+        ui.end_row();
+        ui.label("");
+        ui.small(format!("precision limit here ≈ {floor_mag:.1e}"));
+        ui.end_row();
+    }
+
+    /// "Route" row: Start → End, or a bookmark folder.
+    fn route_picker(&mut self, ui: &mut egui::Ui, items: &[Bookmark]) {
+        let names = folders(items);
+        if names.is_empty() {
+            return;
+        }
+        ui.label("Route");
+        let text = match &self.route {
+            RouteMode::StartEnd => "Start → End".to_string(),
+            RouteMode::Folder(f) => format!("📁 {f}"),
+        };
+        egui::ComboBox::from_id_salt("movie_route")
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.route, RouteMode::StartEnd, "Start → End");
+                for f in names {
+                    let label = format!("📁 {f}");
+                    ui.selectable_value(&mut self.route, RouteMode::Folder(f), label);
+                }
+            });
+        ui.end_row();
+    }
+
+    /// The folder's stops in order, with a rotation slider on each step.
+    fn folder_rows(&mut self, ui: &mut egui::Ui, bookmarks: &mut BookmarksUi, folder: &str) {
+        let Some(path) = folder_path(&bookmarks.items, folder) else {
+            ui.label("");
+            ui.colored_label(WARNING, NEEDS_TWO_STOPS);
+            ui.end_row();
+            return;
+        };
+        let mut prev: Option<Stop> = None;
+        for (k, (idx, stop)) in path.stops.iter().enumerate() {
+            if let Some(p) = prev {
+                ui.label("  turn");
+                let mut rate = bookmarks.items[*idx].rotation;
+                let resp = ui.add(egui::Slider::new(&mut rate, -30.0..=30.0).suffix(" °/s"));
+                if resp.changed() {
+                    // Shown at once; written to disk when the edit ends.
+                    bookmarks.items[*idx].rotation = rate;
+                }
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    bookmarks.set_rotation(*idx, rate);
+                }
+                ui.end_row();
+                if outside_previous(&p, stop, self.width, self.height) {
+                    ui.label("");
+                    ui.colored_label(WARNING, SWINGS_ACROSS);
+                    ui.end_row();
+                }
+            }
+            ui.label(format!("Stop {}", k + 1));
+            ui.label(format!(
+                "{}  ×{:.1e}",
+                bookmarks.items[*idx].name,
+                DEFAULT_SPAN / stop.span
+            ));
+            ui.end_row();
+            prev = Some(*stop);
+        }
+        if path.skipped > 0 {
+            ui.label("");
+            ui.small(format!(
+                "{} bookmark{} skipped (different fractal or IFS)",
+                path.skipped,
+                if path.skipped == 1 { "" } else { "s" }
+            ));
+            ui.end_row();
+        }
+        if path.stops.len() < 2 {
+            ui.label("");
+            ui.colored_label(WARNING, NEEDS_TWO_STOPS);
+            ui.end_row();
+        }
     }
 
     /// "Start" row: the current view or any escape-time bookmark.
@@ -732,12 +888,12 @@ mod tests {
             ..MovieDialog::default()
         };
         let start = current();
-        let a = d.estimate(&start);
+        let a = d.estimate(&d.spec(&start));
         assert_eq!(d.estimate_runs, 1);
-        assert_eq!(d.estimate(&start), a);
+        assert_eq!(d.estimate(&d.spec(&start)), a);
         assert_eq!(d.estimate_runs, 1);
         d.rotation = 10.0;
-        d.estimate(&start);
+        d.estimate(&d.spec(&start));
         assert_eq!(d.estimate_runs, 2);
     }
 
@@ -807,5 +963,80 @@ mod tests {
             Complex64::new(-0.5, 0.0)
         );
         assert_eq!(d.start_name, None);
+    }
+
+    fn filed(name: &str, folder: &str, view: BookmarkView, rotation: f64) -> Bookmark {
+        Bookmark {
+            name: name.into(),
+            view,
+            folder: Some(folder.into()),
+            rotation,
+        }
+    }
+
+    fn mandel(re: f64, im: f64, span: f64, offset: f32) -> BookmarkView {
+        BookmarkView::Escape {
+            kind: FractalKind::Mandelbrot,
+            center: Complex64::new(re, im),
+            span,
+            max_iter: MaxIter::Fixed(500),
+            color: ColorSettings {
+                offset,
+                ..ColorSettings::default()
+            },
+        }
+    }
+
+    fn dive() -> Vec<Bookmark> {
+        vec![
+            filed("deep", "dive", mandel(-0.745, 0.105, 3e-5, 0.75), -20.0),
+            filed("top", "dive", mandel(-0.5, 0.0, 3.0, 0.25), 5.0),
+            filed("mid", "dive", mandel(-0.75, 0.1, 0.03, 0.5), 10.0),
+        ]
+    }
+
+    #[test]
+    fn folder_spec_uses_path_stops_and_first_colors() {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        let items = dive();
+        d.route = RouteMode::Folder("dive".into());
+        let spec = d.current_spec(&items).unwrap();
+        let spans: Vec<f64> = spec.stops.iter().map(|s| s.span).collect();
+        assert_eq!(spans, [3.0, 0.03, 3e-5]);
+        assert_eq!(spec.stops[2].rotation, -20.0);
+        assert_eq!(spec.color.offset, 0.25);
+        assert_eq!(spec.max_iter, MaxIter::Fixed(500));
+    }
+
+    #[test]
+    fn folder_with_one_usable_stop_cannot_render() {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        let ifs = BookmarkView::Ifs {
+            system: crate::engine::ifs::IfsSystem::barnsley_fern(),
+            center: Complex64::new(0.0, 5.0),
+            span: 10.5,
+            points: 1000,
+            color: ColorSettings::default(),
+        };
+        let items = vec![
+            filed("top", "dive", mandel(-0.5, 0.0, 3.0, 0.0), 0.0),
+            filed("fern", "dive", ifs, 0.0),
+        ];
+        d.route = RouteMode::Folder("dive".into());
+        assert!(d.current_spec(&items).is_none());
+    }
+
+    #[test]
+    fn vanished_folder_falls_back_to_start_end() {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        d.route = RouteMode::Folder("dive".into());
+        d.refresh_mode(&dive());
+        assert_eq!(d.route, RouteMode::Folder("dive".into()));
+        d.refresh_mode(&[]);
+        assert_eq!(d.route, RouteMode::StartEnd);
+        assert!(d.current_spec(&[]).is_some());
     }
 }
