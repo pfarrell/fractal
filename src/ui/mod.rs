@@ -7,6 +7,7 @@ pub mod julia;
 pub mod movie_dialog;
 pub mod notes;
 pub mod panel;
+pub mod preview;
 pub mod view;
 
 use eframe::egui;

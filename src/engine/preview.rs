@@ -18,11 +18,13 @@ pub const PREVIEW_FPS: u32 = 12;
 /// Movie time held at once (≈ 600 MB of RGB frames at 320×180).
 pub const WINDOW_SECONDS: f64 = 300.0;
 
-/// `width × height` scaled to fit [`PREVIEW_BOX`], each side even and at
-/// least 16.
+/// `width × height` scaled down to fit [`PREVIEW_BOX`] (never up), each
+/// side even and at least 16.
 pub fn preview_size(width: usize, height: usize) -> (usize, usize) {
     let (bw, bh) = PREVIEW_BOX;
-    let scale = (bw as f64 / width.max(1) as f64).min(bh as f64 / height.max(1) as f64);
+    let scale = (bw as f64 / width.max(1) as f64)
+        .min(bh as f64 / height.max(1) as f64)
+        .min(1.0);
     let side = |v: usize| (((v as f64 * scale) / 2.0).round() as usize * 2).max(16);
     (side(width), side(height))
 }
