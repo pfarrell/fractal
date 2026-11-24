@@ -28,6 +28,7 @@ use crate::engine::keyframe::{
 };
 use crate::engine::render::{CancelToken, Sampler, render};
 use crate::engine::route::{JOINT_HALF_WIDTH_S, Route, Stop, step_length};
+use crate::engine::soundtrack::{add_music, plan_soundtrack, probe_track};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,9 @@ pub struct MovieSpec {
     /// Exact renders every frame; Fast and Smooth resample keyframes.
     #[serde(default)]
     pub quality: Quality,
+    /// Tracks to add as music once the video is done, in play order.
+    #[serde(default)]
+    pub music: Vec<PathBuf>,
 }
 
 pub enum MovieProgress {
@@ -100,7 +104,17 @@ pub enum MovieProgress {
         total: usize,
     },
     Encoding,
+    /// The video is done and the music is being added.
+    AddingMusic,
     Done(PathBuf),
+}
+
+/// A finished movie.
+#[derive(Debug)]
+pub struct Saved {
+    pub path: PathBuf,
+    /// Why the chosen music isn't in it, if it isn't.
+    pub music_error: Option<String>,
 }
 
 /// What a cancelled movie left behind.
@@ -112,6 +126,8 @@ pub struct Kept {
     /// ffmpeg closed the file cleanly, so it holds all of `frames`.
     /// Otherwise it was stopped or failed and may hold fewer.
     pub finished: bool,
+    /// Why the chosen music isn't in it, if it isn't.
+    pub music_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -127,6 +143,8 @@ pub enum MovieError {
         stderr_tail: String,
     },
     FfmpegMissing,
+    /// Music was chosen but ffprobe, needed to read it, isn't installed.
+    FfprobeMissing,
 }
 
 impl std::fmt::Display for MovieError {
@@ -145,6 +163,10 @@ impl std::fmt::Display for MovieError {
                         "cancelled; ffmpeg didn't finish the file, so {path} may hold \
                          fewer than the {n} frames rendered"
                     ),
+                }?;
+                match &k.music_error {
+                    Some(e) => write!(f, "; music not added: {e}"),
+                    None => Ok(()),
                 }
             }
             MovieError::Io(e) => write!(f, "file error: {e}"),
@@ -157,6 +179,11 @@ impl std::fmt::Display for MovieError {
             MovieError::FfmpegMissing => write!(
                 f,
                 "ffmpeg not found — movie export needs it. {}, then try again.",
+                ffmpeg_install_hint()
+            ),
+            MovieError::FfprobeMissing => write!(
+                f,
+                "ffprobe not found — adding music needs it. {}, then try again.",
                 ffmpeg_install_hint()
             ),
         }
@@ -215,19 +242,28 @@ pub fn find_program<'a>(
 }
 
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
 /// How much of ffmpeg's error output to keep.
 const STDERR_TAIL_BYTES: usize = 2048;
+
+/// The last [`STDERR_TAIL_BYTES`] of `err`, cut on a char boundary.
+pub(crate) fn stderr_tail(err: &str) -> &str {
+    let start = err.len().saturating_sub(STDERR_TAIL_BYTES);
+    let start = (start..err.len())
+        .find(|&i| err.is_char_boundary(i))
+        .unwrap_or(err.len());
+    &err[start..]
+}
 
 impl MovieSpec {
     /// Everything [`Self::validate_frames`] checks, plus the output path.
@@ -392,15 +428,19 @@ const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// Rendering the next frame overlaps encoding the last. On cancel, the
 /// frames rendered so far are kept as a shorter movie; on failure (or a
 /// cancel before any frame), a partial output file this run created is
-/// removed.
+/// removed. Chosen music (read with `ffprobe`) is checked before the first
+/// frame and added afterwards, to a kept cancelled movie too; if adding it
+/// fails, the movie is kept without it.
 pub fn render_movie(
     spec: &MovieSpec,
     threads: usize,
     ffmpeg: &Path,
+    ffprobe: Option<&Path>,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(MovieProgress),
-) -> Result<PathBuf, MovieError> {
+) -> Result<Saved, MovieError> {
     spec.validate()?;
+    let music = check_music(spec, ffprobe)?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads.max(1))
         .build()
@@ -449,6 +489,7 @@ pub fn render_movie(
                     path: spec.output.clone(),
                     frames: sent,
                     finished,
+                    music_error: None,
                 }),
             })
         }
@@ -478,10 +519,40 @@ pub fn render_movie(
     };
     match result {
         Ok(()) => {
+            let music_error = match &music {
+                None => None,
+                Some(m) => {
+                    progress(MovieProgress::AddingMusic);
+                    match m.add(ffmpeg, &spec.output, cancel) {
+                        Ok(()) => None,
+                        Err(e) if e == "cancelled" => {
+                            return Err(MovieError::Cancelled {
+                                kept: Some(Kept {
+                                    path: spec.output.clone(),
+                                    frames: sent,
+                                    finished: true,
+                                    music_error: Some(e),
+                                }),
+                            });
+                        }
+                        Err(e) => Some(e),
+                    }
+                }
+            };
             progress(MovieProgress::Done(spec.output.clone()));
-            Ok(spec.output.clone())
+            Ok(Saved {
+                path: spec.output.clone(),
+                music_error,
+            })
         }
-        Err(e @ MovieError::Cancelled { kept: Some(_) }) => Err(e),
+        Err(MovieError::Cancelled { kept: Some(mut k) }) => {
+            if let Some(m) = &music {
+                // The first Cancel stopped the render; another stops this.
+                progress(MovieProgress::AddingMusic);
+                k.music_error = m.add(ffmpeg, &spec.output, &cancel.renewed()).err();
+            }
+            Err(MovieError::Cancelled { kept: Some(k) })
+        }
         Err(e) => {
             if !existed_before {
                 let _ = std::fs::remove_file(&spec.output);
@@ -489,6 +560,43 @@ pub fn render_movie(
             Err(e)
         }
     }
+}
+
+/// Chosen music, read and checked before rendering.
+struct Music<'a> {
+    ffprobe: &'a Path,
+    tracks: &'a [PathBuf],
+    secs: Vec<f64>,
+}
+
+impl Music<'_> {
+    fn add(&self, ffmpeg: &Path, video: &Path, cancel: &CancelToken) -> Result<(), String> {
+        add_music(ffmpeg, self.ffprobe, video, self.tracks, &self.secs, cancel)
+    }
+}
+
+/// Read every chosen track's length and check the playlist can fill the
+/// movie, so a bad track fails before any rendering. `None`: no music.
+fn check_music<'a>(
+    spec: &'a MovieSpec,
+    ffprobe: Option<&'a Path>,
+) -> Result<Option<Music<'a>>, MovieError> {
+    if spec.music.is_empty() {
+        return Ok(None);
+    }
+    let ffprobe = ffprobe.ok_or(MovieError::FfprobeMissing)?;
+    let secs = spec
+        .music
+        .iter()
+        .map(|t| probe_track(ffprobe, t))
+        .collect::<Result<Vec<f64>, String>>()
+        .map_err(MovieError::Invalid)?;
+    plan_soundtrack(&secs, spec.seconds).map_err(MovieError::Invalid)?;
+    Ok(Some(Music {
+        ffprobe,
+        tracks: &spec.music,
+        secs,
+    }))
 }
 
 /// Render frame `i` the exact way: one `iterate` per pixel. `out` is
@@ -676,6 +784,7 @@ fn finish(
                     path: PathBuf::new(),
                     frames: 0,
                     finished,
+                    music_error: None,
                 }),
             });
         }
@@ -686,12 +795,8 @@ fn finish(
         // ffmpeg can't succeed without reading every frame, but be sure.
         return wrote.map_err(MovieError::Io);
     }
-    let tail_start = err.len().saturating_sub(STDERR_TAIL_BYTES);
-    let tail_start = (tail_start..err.len())
-        .find(|&i| err.is_char_boundary(i))
-        .unwrap_or(err.len());
     Err(MovieError::Ffmpeg {
         status: status.code(),
-        stderr_tail: err[tail_start..].to_string(),
+        stderr_tail: stderr_tail(&err).to_string(),
     })
 }

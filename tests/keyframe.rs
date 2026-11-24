@@ -42,6 +42,7 @@ fn base(quality: Quality) -> MovieSpec {
         color: ColorSettings::default(),
         output: PathBuf::from("/tmp/unused.mp4"),
         quality,
+        music: Vec::new(),
     }
 }
 

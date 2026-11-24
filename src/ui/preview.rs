@@ -531,6 +531,7 @@ mod tests {
             color: ColorSettings::default(),
             output: PathBuf::from("/tmp/x.mp4"),
             quality: Quality::Smooth,
+            music: Vec::new(),
         }
     }
 

@@ -42,6 +42,7 @@ fn folder(seconds: f64) -> MovieSpec {
         color: ColorSettings::default(),
         output: PathBuf::from("/no/such/dir/x.mp4"),
         quality: Quality::Smooth,
+        music: Vec::new(),
     }
 }
 

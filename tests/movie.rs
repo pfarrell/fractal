@@ -1,10 +1,13 @@
+mod common;
+
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::color::colorize;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, plan};
 use fractal_explorer::engine::movie::{
-    Kept, MovieError, MovieProgress, MovieSpec, RotatedSampler, ffmpeg_args, ffmpeg_install_hint,
-    find_program, render_exact_frame, render_movie, render_range, rotated_point,
+    Kept, MovieError, MovieProgress, MovieSpec, RotatedSampler, Saved, ffmpeg_args,
+    ffmpeg_install_hint, find_program, render_exact_frame, render_movie, render_range,
+    rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
 use fractal_explorer::engine::route::Stop;
@@ -38,6 +41,7 @@ fn spec(out: PathBuf) -> MovieSpec {
         color: ColorSettings::default(),
         output: out,
         quality: Quality::Exact,
+        music: Vec::new(),
     }
 }
 
@@ -258,6 +262,7 @@ fn missing_ffmpeg_errors_before_rendering() {
         &short(out.clone(), 2),
         2,
         Path::new("/nonexistent/ffmpeg"),
+        None,
         &CancelToken::never(),
         &mut |p| {
             if let MovieProgress::Frame { .. } = p {
@@ -278,6 +283,7 @@ fn encoder_dying_mid_stream_is_reported() {
         &short(dir.path().join("o.mp4"), 30),
         2,
         Path::new("false"),
+        None,
         &CancelToken::never(),
         &mut |_| {},
     );
@@ -314,6 +320,7 @@ fn unwritable_output_errors() {
         &short(out, 2),
         2,
         Path::new("ffmpeg"),
+        None,
         &CancelToken::never(),
         &mut |_| {},
     );
@@ -343,6 +350,7 @@ fn tiny_movie_end_to_end() {
         &sp,
         2,
         Path::new("ffmpeg"),
+        None,
         &CancelToken::never(),
         &mut |p| {
             if let MovieProgress::Frame { .. } = p {
@@ -350,7 +358,7 @@ fn tiny_movie_end_to_end() {
             }
         },
     );
-    assert_eq!(r.unwrap(), out);
+    assert_eq!(r.unwrap().path, out);
     assert_eq!(frames, 12);
     // The encoded file really holds 12 frames of 64×48.
     let probe = std::process::Command::new("ffprobe")
@@ -413,6 +421,7 @@ fn unfinished_mp4_is_already_watchable() {
         &sp,
         2,
         Path::new("ffmpeg"),
+        None,
         &CancelToken::never(),
         &mut |_| {},
     )
@@ -432,13 +441,13 @@ fn unfinished_mp4_is_already_watchable() {
 }
 
 /// Render `sp`, cancelling once `after` frames are done.
-fn cancel_after(sp: &MovieSpec, after: usize) -> Result<PathBuf, MovieError> {
+fn cancel_after(sp: &MovieSpec, after: usize) -> Result<Saved, MovieError> {
     let generation = Arc::new(AtomicU64::new(0));
     let token = CancelToken::new(generation.clone(), 0);
     if after == 0 {
         generation.fetch_add(1, Ordering::Relaxed);
     }
-    render_movie(sp, 2, Path::new("ffmpeg"), &token, &mut |p| {
+    render_movie(sp, 2, Path::new("ffmpeg"), None, &token, &mut |p| {
         if let MovieProgress::Frame { done, .. } = p
             && done == after
         {
@@ -462,6 +471,7 @@ fn cancel_keeps_the_frames_rendered_so_far() {
                     path,
                     frames: n,
                     finished: true,
+                    ..
                 }),
         }) = r
         else {
@@ -499,7 +509,7 @@ fn cancel_where_the_encoder_fails_to_finish_says_so() {
     let out = dir.path().join("c.mp4");
     let generation = Arc::new(AtomicU64::new(0));
     let token = CancelToken::new(generation.clone(), 0);
-    let r = render_movie(&short(out.clone(), 30), 2, &enc, &token, &mut |p| {
+    let r = render_movie(&short(out.clone(), 30), 2, &enc, None, &token, &mut |p| {
         if let MovieProgress::Frame { done: 3, .. } = p {
             generation.fetch_add(1, Ordering::Relaxed);
         }
@@ -539,6 +549,7 @@ fn cancelled_message_says_where_the_frames_are() {
             path: PathBuf::from("/m/z.mp4"),
             frames,
             finished,
+            music_error: None,
         }),
     };
     assert_eq!(
@@ -658,10 +669,11 @@ fn fast_and_smooth_movies_decode_every_frame() {
             &sp,
             2,
             Path::new("ffmpeg"),
+            None,
             &CancelToken::never(),
             &mut |_| {},
         );
-        assert_eq!(r.unwrap(), out);
+        assert_eq!(r.unwrap().path, out);
         if let Some(n) = decodable_frames(&out) {
             assert_eq!(n, 60, "{q:?}");
         }
@@ -686,6 +698,7 @@ fn keyframe_progress_is_reported() {
         &sp,
         2,
         Path::new("ffmpeg"),
+        None,
         &CancelToken::never(),
         &mut |p| match p {
             MovieProgress::Keyframe { done, total } => seen.push((done, total)),
@@ -712,7 +725,7 @@ fn cancel_during_keyframe_is_prompt() {
     let generation = Arc::new(AtomicU64::new(0));
     let token = CancelToken::new(generation.clone(), 0);
     let mut cancelled_at = None;
-    let r = render_movie(&sp, 2, Path::new("ffmpeg"), &token, &mut |p| {
+    let r = render_movie(&sp, 2, Path::new("ffmpeg"), None, &token, &mut |p| {
         if let MovieProgress::Keyframe { .. } = p
             && cancelled_at.is_none()
         {
@@ -770,7 +783,7 @@ fn cancel_during_a_later_keyframe_keeps_the_earlier_stretch() {
     let generation = Arc::new(AtomicU64::new(0));
     let token = CancelToken::new(generation.clone(), 0);
     // Cancel as the second keyframe starts: the first stretch is all sent.
-    let r = render_movie(&sp, 2, Path::new("ffmpeg"), &token, &mut |p| {
+    let r = render_movie(&sp, 2, Path::new("ffmpeg"), None, &token, &mut |p| {
         if let MovieProgress::Keyframe { done: 1, .. } = p {
             generation.fetch_add(1, Ordering::Relaxed);
         }
@@ -781,6 +794,7 @@ fn cancel_during_a_later_keyframe_keeps_the_earlier_stretch() {
                 path,
                 frames,
                 finished: true,
+                ..
             }),
     }) = r
     else {
@@ -872,10 +886,11 @@ fn fast_and_smooth_three_stop_movie_decodes() {
             &sp,
             2,
             Path::new("ffmpeg"),
+            None,
             &CancelToken::never(),
             &mut |_| {},
         );
-        assert_eq!(r.unwrap(), out);
+        assert_eq!(r.unwrap().path, out);
         if let Some(n) = decodable_frames(&out) {
             assert_eq!(n, sp.frame_count(), "{q:?}");
         }
@@ -990,4 +1005,245 @@ fn validate_frames_ignores_output() {
     sp.output = PathBuf::from("/no/such/dir/x.mp4");
     assert!(sp.validate_frames().is_ok());
     assert!(sp.validate().is_err());
+}
+
+/// `short(out, frames)` with one `secs`-long tone as its music.
+fn with_music(dir: &Path, out: PathBuf, frames: u32, secs: f64) -> MovieSpec {
+    let mut sp = short(out, frames);
+    sp.music = vec![common::sine(dir, "t.mp3", secs)];
+    sp
+}
+
+#[test]
+fn music_without_ffprobe_fails_before_rendering() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("o.mp4");
+    let mut sp = short(out.clone(), 2);
+    sp.music = vec![dir.path().join("t.mp3")];
+    let mut frames = 0;
+    let r = render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        None,
+        &CancelToken::never(),
+        &mut |p| {
+            if let MovieProgress::Frame { .. } = p {
+                frames += 1
+            }
+        },
+    );
+    assert!(matches!(r, Err(MovieError::FfprobeMissing)), "{r:?}");
+    assert_eq!(frames, 0);
+    assert!(!out.exists());
+}
+
+#[test]
+fn unreadable_track_fails_before_rendering() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("o.mp4");
+    let mut sp = short(out.clone(), 2);
+    sp.music = vec![dir.path().join("gone.mp3")];
+    let mut frames = 0;
+    let r = render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        Some(Path::new("ffprobe")),
+        &CancelToken::never(),
+        &mut |p| {
+            if let MovieProgress::Frame { .. } = p {
+                frames += 1
+            }
+        },
+    );
+    let Err(MovieError::Invalid(m)) = &r else {
+        panic!("{r:?}");
+    };
+    assert!(m.contains("gone.mp3"), "{m}");
+    assert_eq!(frames, 0);
+    assert!(!out.exists());
+}
+
+#[test]
+fn movie_with_music_end_to_end() {
+    if !common::have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("m.mp4");
+    let sp = with_music(dir.path(), out.clone(), 12, 0.5);
+    let mut seen = Vec::new();
+    let r = render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        Some(Path::new("ffprobe")),
+        &CancelToken::never(),
+        &mut |p| match p {
+            MovieProgress::Encoding => seen.push("encoding"),
+            MovieProgress::AddingMusic => seen.push("music"),
+            MovieProgress::Done(_) => seen.push("done"),
+            _ => {}
+        },
+    )
+    .unwrap();
+    assert_eq!(r.path, out);
+    assert_eq!(r.music_error, None);
+    assert_eq!(seen, ["encoding", "music", "done"]);
+    assert_eq!(common::stream_types(&out), ["video", "audio"]);
+}
+
+#[test]
+fn movie_without_music_skips_the_music_pass() {
+    if !common::have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("m.mp4");
+    let mut music = false;
+    let r = render_movie(
+        &short(out.clone(), 4),
+        2,
+        Path::new("ffmpeg"),
+        None,
+        &CancelToken::never(),
+        &mut |p| music |= matches!(p, MovieProgress::AddingMusic),
+    )
+    .unwrap();
+    assert_eq!(r.music_error, None);
+    assert!(!music);
+    assert_eq!(common::stream_types(&out), ["video"]);
+}
+
+#[test]
+fn music_failure_still_saves_the_movie() {
+    if !common::have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("m.mp4");
+    let sp = with_music(dir.path(), out.clone(), 12, 0.5);
+    let track = sp.music[0].clone();
+    let r = render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        Some(Path::new("ffprobe")),
+        &CancelToken::never(),
+        &mut |p| {
+            if let MovieProgress::AddingMusic = p {
+                std::fs::remove_file(&track).unwrap();
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(r.path, out);
+    assert!(r.music_error.is_some());
+    assert_eq!(common::stream_types(&out), ["video"]);
+}
+
+#[test]
+fn cancel_during_music_keeps_silent_movie() {
+    if !common::have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("m.mp4");
+    let sp = with_music(dir.path(), out.clone(), 12, 0.5);
+    let generation = Arc::new(AtomicU64::new(0));
+    let token = CancelToken::new(generation.clone(), 0);
+    let r = render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        Some(Path::new("ffprobe")),
+        &token,
+        &mut |p| {
+            if let MovieProgress::AddingMusic = p {
+                generation.fetch_add(1, Ordering::Relaxed);
+            }
+        },
+    );
+    let Err(MovieError::Cancelled {
+        kept:
+            Some(Kept {
+                path,
+                finished: true,
+                music_error: Some(m),
+                ..
+            }),
+    }) = &r
+    else {
+        panic!("{r:?}");
+    };
+    assert_eq!(path, &out);
+    assert_eq!(m, "cancelled");
+    assert_eq!(common::stream_types(&out), ["video"]);
+}
+
+#[test]
+fn cancelled_render_still_gets_music() {
+    if !common::have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("m.mp4");
+    let sp = with_music(dir.path(), out.clone(), 30, 0.5);
+    let generation = Arc::new(AtomicU64::new(0));
+    let token = CancelToken::new(generation.clone(), 0);
+    let r = render_movie(
+        &sp,
+        2,
+        Path::new("ffmpeg"),
+        Some(Path::new("ffprobe")),
+        &token,
+        &mut |p| {
+            if let MovieProgress::Frame { done: 5, .. } = p {
+                generation.fetch_add(1, Ordering::Relaxed);
+            }
+        },
+    );
+    let Err(MovieError::Cancelled {
+        kept: Some(Kept {
+            music_error: None, ..
+        }),
+    }) = &r
+    else {
+        panic!("{r:?}");
+    };
+    assert_eq!(common::stream_types(&out), ["video", "audio"]);
+    let (a, v) = (
+        common::stream_secs(&out, "a"),
+        common::stream_secs(&out, "v"),
+    );
+    assert!((a - v).abs() < 0.1, "audio {a} video {v}");
+}
+
+#[test]
+fn kept_message_mentions_missing_music() {
+    let e = MovieError::Cancelled {
+        kept: Some(Kept {
+            path: PathBuf::from("/m/z.mp4"),
+            frames: 5,
+            finished: true,
+            music_error: Some("x".into()),
+        }),
+    };
+    assert_eq!(
+        e.to_string(),
+        "cancelled; the 5 frames rendered are in /m/z.mp4; music not added: x"
+    );
+}
+
+#[test]
+fn ffprobe_missing_message_has_the_install_hint() {
+    let m = MovieError::FfprobeMissing.to_string();
+    assert_eq!(
+        m,
+        format!(
+            "ffprobe not found — adding music needs it. {}, then try again.",
+            ffmpeg_install_hint()
+        )
+    );
 }

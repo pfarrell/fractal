@@ -10,4 +10,5 @@ pub mod newton;
 pub mod preview;
 pub mod render;
 pub mod route;
+pub mod soundtrack;
 pub mod viewport;
