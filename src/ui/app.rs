@@ -373,7 +373,11 @@ impl FractalApp {
                     self.menu_point = Some(p);
                 }
                 if let Some(p) = self.menu_point {
-                    resp.response.context_menu(|ui| self.canvas_menu(ui, p));
+                    // Stays open while its fields are used; closes on a click
+                    // outside, Escape, Save, Cancel or Center here.
+                    egui::Popup::context_menu(&resp.response)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| self.canvas_menu(ui, p));
                 }
             });
 
@@ -455,6 +459,10 @@ impl FractalApp {
         ui.label("Bookmark here (same zoom)");
         let view = self.current_bookmark_view().with_center(p);
         if self.bookmarks.save_form(ui, move || view) {
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Cancel").clicked() {
             ui.close();
         }
     }

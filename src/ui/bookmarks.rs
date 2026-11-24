@@ -134,7 +134,13 @@ impl BookmarksUi {
                     return;
                 }
                 let names = folders(&self.items);
-                self.save_row(ui, &names, "bookmark_save_folder", "Save current", current);
+                self.save_row(
+                    ui,
+                    &names,
+                    Some("bookmark_save_folder"),
+                    "Save current",
+                    current,
+                );
                 ui.separator();
                 let mut action = None;
                 for i in folder_order(&self.items, None) {
@@ -171,7 +177,7 @@ impl BookmarksUi {
     /// Returns true once saved.
     pub fn save_form(&mut self, ui: &mut egui::Ui, view: impl FnOnce() -> BookmarkView) -> bool {
         let names = folders(&self.items);
-        self.save_row(ui, &names, "bookmark_here_folder", "Save here", view)
+        self.save_row(ui, &names, None, "Save here", view)
     }
 
     /// Name, folder and "Save current". Returns true once saved.
@@ -179,7 +185,8 @@ impl BookmarksUi {
         &mut self,
         ui: &mut egui::Ui,
         names: &[String],
-        combo_id: &str,
+        // `None`: list folders in place instead of a dropdown.
+        combo_id: Option<&str>,
         button: &str,
         current: impl FnOnce() -> BookmarkView,
     ) -> bool {
@@ -189,27 +196,40 @@ impl BookmarksUi {
         {
             self.save_folder = FolderChoice::Unfiled;
         }
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.name);
-            let label = match &self.save_folder {
-                FolderChoice::Unfiled => "Unfiled".to_string(),
-                FolderChoice::Existing(f) => f.clone(),
-                FolderChoice::New => "New folder…".to_string(),
-            };
-            egui::ComboBox::from_id_salt(combo_id)
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.save_folder, FolderChoice::Unfiled, "Unfiled");
-                    for f in names {
-                        ui.selectable_value(
-                            &mut self.save_folder,
-                            FolderChoice::Existing(f.clone()),
-                            f,
-                        );
-                    }
-                    ui.selectable_value(&mut self.save_folder, FolderChoice::New, "New folder…");
+        let label = match &self.save_folder {
+            FolderChoice::Unfiled => "Unfiled".to_string(),
+            FolderChoice::Existing(f) => f.clone(),
+            FolderChoice::New => "New folder…".to_string(),
+        };
+        let choices = |ui: &mut egui::Ui, choice: &mut FolderChoice| {
+            ui.selectable_value(choice, FolderChoice::Unfiled, "Unfiled");
+            for f in names {
+                ui.selectable_value(choice, FolderChoice::Existing(f.clone()), f);
+            }
+            ui.selectable_value(choice, FolderChoice::New, "New folder…");
+        };
+        match combo_id {
+            Some(id) => {
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.name);
+                    egui::ComboBox::from_id_salt(id)
+                        .selected_text(label)
+                        .show_ui(ui, |ui| choices(ui, &mut self.save_folder));
                 });
-        });
+            }
+            // Inside a popup a dropdown would count as a click outside it,
+            // so the folders are listed in place.
+            None => {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut self.name);
+                });
+                ui.label("Folder");
+                ui.indent("bookmark_here_folders", |ui| {
+                    choices(ui, &mut self.save_folder)
+                });
+            }
+        }
         ui.horizontal(|ui| {
             let folder = match &self.save_folder {
                 FolderChoice::Unfiled => Some(None),
