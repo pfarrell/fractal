@@ -264,3 +264,37 @@ pub fn add_music(
     out.persist(video).map_err(|e| io(e.error))?;
     Ok(())
 }
+
+/// A music track's playable length in seconds, measured from its audio
+/// packets: a header estimate can be far off (a VBR mp3 without a Xing
+/// header), and a file with a length but no audio (a GIF, a silent video)
+/// is refused. Errors start with the file's name.
+pub fn probe_track(ffprobe: &Path, file: &Path) -> Result<f64, String> {
+    let name = file_label(file);
+    let out = Command::new(ffprobe)
+        .args(["-v", "error", "-select_streams", "a:0"])
+        .args(["-show_entries", "packet=pts_time,duration_time"])
+        .args(["-of", "csv=p=0"])
+        .arg(file)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{name}: can't run ffprobe: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "{name}: can't be read: {}",
+            stderr_tail(err.trim())
+        ));
+    }
+    let end = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pts, dur) = line.split_once(',')?;
+            Some(pts.trim().parse::<f64>().ok()? + dur.trim().parse::<f64>().unwrap_or(0.0))
+        })
+        .fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
+    match end {
+        Some(d) if positive(d) => Ok(d),
+        _ => Err(format!("{name}: has no audio to play")),
+    }
+}

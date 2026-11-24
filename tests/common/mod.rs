@@ -128,3 +128,33 @@ pub fn names(dir: &Path) -> Vec<String> {
     v.sort();
     v
 }
+
+/// 15 s of silence then 15 s of tone as VBR mp3 with no Xing header, so
+/// its header-estimated length (~42 s) is far from the real 30 s.
+pub fn vbr_no_header(dir: &Path, name: &str) -> PathBuf {
+    let p = dir.join(name);
+    run(&[
+        "ffmpeg",
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=44100:cl=stereo:d=15",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=f=440:d=15",
+        "-filter_complex",
+        "[0][1]concat=n=2:v=0:a=1",
+        "-c:a",
+        "libmp3lame",
+        "-q:a",
+        "6",
+        "-write_xing",
+        "0",
+        p.to_str().unwrap(),
+    ]);
+    p
+}

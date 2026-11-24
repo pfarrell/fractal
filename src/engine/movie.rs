@@ -27,7 +27,7 @@ use crate::engine::keyframe::{
     render_keyframe, resample,
 };
 use crate::engine::render::{CancelToken, Sampler, render};
-use crate::engine::soundtrack::{add_music, plan_soundtrack, probe_duration};
+use crate::engine::soundtrack::{add_music, plan_soundtrack, probe_track};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -613,7 +613,7 @@ fn check_music<'a>(
     let secs = spec
         .music
         .iter()
-        .map(|t| probe_duration(ffprobe, t))
+        .map(|t| probe_track(ffprobe, t))
         .collect::<Result<Vec<f64>, String>>()
         .map_err(MovieError::Invalid)?;
     plan_soundtrack(&secs, spec.seconds).map_err(MovieError::Invalid)?;

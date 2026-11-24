@@ -8,7 +8,7 @@ use crate::engine::movie::{
     CameraPath, MovieError, MovieProgress, MovieSpec, Saved, find_ffmpeg, render_movie,
 };
 use crate::engine::render::CancelToken;
-use crate::engine::soundtrack::{CROSSFADE_S, find_ffprobe, probe_duration};
+use crate::engine::soundtrack::{CROSSFADE_S, find_ffprobe, probe_track};
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use eframe::egui;
 use num_complex::Complex64;
@@ -274,16 +274,26 @@ impl MovieDialog {
     fn find_tools(&mut self) {
         self.ffmpeg = find_ffmpeg();
         self.ffprobe = self.ffmpeg.as_deref().and_then(find_ffprobe);
+        self.reprobe_failed();
     }
 
     /// Append tracks, reading each one's length now.
     fn add_tracks(&mut self, paths: Vec<PathBuf>) {
         for path in paths {
             let probed = match &self.ffprobe {
-                Some(ffprobe) => probe_duration(ffprobe, &path),
+                Some(ffprobe) => probe_track(ffprobe, &path),
                 None => Err("ffprobe not found".into()),
             };
             self.music.push(Track { path, probed });
+        }
+    }
+
+    /// Read again any track that failed, e.g. because ffprobe was missing
+    /// when it was added.
+    fn reprobe_failed(&mut self) {
+        let Some(ffprobe) = &self.ffprobe else { return };
+        for t in self.music.iter_mut().filter(|t| t.probed.is_err()) {
+            t.probed = probe_track(ffprobe, &t.path);
         }
     }
 
@@ -1045,5 +1055,31 @@ mod tests {
             d.music_blocker(),
             Some(MovieError::FfprobeMissing)
         ));
+    }
+
+    #[test]
+    fn tracks_unread_without_ffprobe_are_read_once_it_is_found() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.mp3");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=1"])
+            .arg(&p)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mut d = MovieDialog::default();
+        d.add_tracks(vec![p]);
+        assert!(d.music[0].probed.is_err());
+        d.ffprobe = Some(PathBuf::from("ffprobe"));
+        d.reprobe_failed();
+        let secs = d.music[0].probed.clone().unwrap();
+        assert!((secs - 1.0).abs() < 0.1, "{secs}");
     }
 }

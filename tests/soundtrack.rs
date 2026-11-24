@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use fractal_explorer::engine::render::CancelToken;
 use fractal_explorer::engine::soundtrack::{
-    add_music, filter_graph, find_ffprobe, mux_args, plan_soundtrack, probe_duration,
+    add_music, filter_graph, find_ffprobe, mux_args, plan_soundtrack, probe_duration, probe_track,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -324,4 +324,34 @@ fn music_keeps_the_movies_permissions() {
     .unwrap();
     let mode = std::fs::metadata(&m).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o644, "{mode:o}");
+}
+
+#[test]
+fn track_without_audio_is_rejected() {
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // A silent video has a length but nothing to play.
+    let v = video(dir.path(), "silent.mp4", 2.0);
+    let e = probe_track(Path::new("ffprobe"), &v).unwrap_err();
+    assert!(e.starts_with("silent.mp4"), "{e}");
+    assert!(e.contains("no audio"), "{e}");
+}
+
+#[test]
+fn track_length_is_measured_not_estimated() {
+    if !have_tools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let t = vbr_no_header(dir.path(), "vbr.mp3");
+    let d = probe_track(Path::new("ffprobe"), &t).unwrap();
+    assert!((d - 30.0).abs() < 0.1, "{d}");
+}
+
+#[test]
+fn track_probe_names_a_missing_file() {
+    let e = probe_track(Path::new("ffprobe"), Path::new("/nope/gone.mp3")).unwrap_err();
+    assert!(e.starts_with("gone.mp3"), "{e}");
 }
