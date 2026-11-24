@@ -15,7 +15,10 @@
 //! outward from it. With no zoom (r = 1) there is no fixed point, so the
 //! center pans in a straight line instead.
 //!
-//! `rotation` turns each frame about the screen center.
+//! A movie can pass through more stops than two: see
+//! [`crate::engine::route`], which paces the steps and blends them at each
+//! stop. Each stop's `rotation` turns the picture about the screen center
+//! on the step arriving there.
 
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate};
@@ -24,6 +27,7 @@ use crate::engine::keyframe::{
     render_keyframe, resample,
 };
 use crate::engine::render::{CancelToken, Sampler, render};
+use crate::engine::route::{JOINT_HALF_WIDTH_S, Route, Stop, step_length};
 use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -64,10 +68,8 @@ impl Sampler for RotatedSampler {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MovieSpec {
     pub kind: FractalKind,
-    pub start_center: Complex64,
-    pub start_span: f64,
-    pub target: Complex64,
-    pub end_span: f64,
+    /// The views the camera passes through, first to last (at least two).
+    pub stops: Vec<Stop>,
     pub fps: u32,
     pub seconds: f64,
     pub width: usize,
@@ -75,9 +77,6 @@ pub struct MovieSpec {
     pub max_iter: MaxIter,
     pub color: ColorSettings,
     pub output: PathBuf,
-    /// Degrees per second the picture turns (negative: the other way).
-    #[serde(default)]
-    pub rotation: f64,
     /// Exact renders every frame; Fast and Smooth resample keyframes.
     #[serde(default)]
     pub quality: Quality,
@@ -241,18 +240,36 @@ impl MovieSpec {
         if !(self.seconds.is_finite() && self.seconds > 0.0) {
             return bad("duration must be positive");
         }
-        if !self.rotation.is_finite() {
+        if self.stops.len() < 2 {
+            return bad("a movie needs at least two stops");
+        }
+        if !self.stops.iter().all(|s| s.rotation.is_finite()) {
             return bad("rotation must be a number");
         }
-        let spans_ok = [self.start_span, self.end_span]
+        if !self
+            .stops
             .iter()
-            .all(|s| s.is_finite() && *s > 0.0);
-        if !spans_ok {
+            .all(|s| s.span.is_finite() && s.span > 0.0)
+        {
             return bad("zoom spans must be positive");
         }
-        // Small tolerance so "as deep as allowed" survives float rounding.
-        if self.end_span / (self.height as f64) < min_pixel_scale(self.target) * (1.0 - 1e-9) {
-            return bad("end zoom is past the f64 precision limit for this point");
+        if self
+            .stops
+            .windows(2)
+            .any(|w| step_length(&w[0], &w[1]) == 0.0)
+        {
+            return bad("two stops in a row are the same view");
+        }
+        let last = self.stops.len() - 1;
+        for (k, s) in self.stops.iter().enumerate() {
+            // Small tolerance so "as deep as allowed" survives float rounding.
+            if s.span / (self.height as f64) < min_pixel_scale(s.center) * (1.0 - 1e-9) {
+                return Err(MovieError::Invalid(if k == last {
+                    "end zoom is past the f64 precision limit for this point".into()
+                } else {
+                    format!("stop {} is past the f64 precision limit", k + 1)
+                }));
+            }
         }
         self.validate_output()
     }
@@ -283,24 +300,24 @@ impl MovieSpec {
         ((self.fps as f64 * self.seconds).round() as usize).max(2)
     }
 
+    /// The camera route through `stops` over the movie's duration.
+    pub fn route(&self) -> Route {
+        Route::new(&self.stops, self.seconds, JOINT_HALF_WIDTH_S)
+    }
+
+    /// Movie time of frame `i`, in seconds.
+    fn frame_time(&self, i: usize) -> f64 {
+        i as f64 / (self.frame_count() - 1) as f64 * self.seconds
+    }
+
     pub fn frame_view(&self, i: usize) -> Viewport {
-        let t = i as f64 / (self.frame_count() - 1) as f64;
-        let r = self.end_span / self.start_span;
-        let span = self.start_span * r.powf(t);
-        let (c0, c1) = (self.start_center, self.target);
-        let center = if (1.0 - r).abs() < 1e-9 {
-            c0 + (c1 - c0) * t
-        } else {
-            let fixed = (c1 - c0 * r) / (1.0 - r);
-            fixed + (c0 - fixed) * (span / self.start_span)
-        };
+        let (center, span) = self.route().view_at(self.frame_time(i));
         Viewport::new(center, span, self.width, self.height)
     }
 
     /// How far frame `i` is turned, in radians.
     pub fn frame_angle(&self, i: usize) -> f64 {
-        let t = i as f64 / (self.frame_count() - 1) as f64;
-        self.rotation.to_radians() * t * self.seconds
+        self.route().angle_at(self.frame_time(i))
     }
 
     /// Frame `i`'s four corners in the complex plane, turned with the

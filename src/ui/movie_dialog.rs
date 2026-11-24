@@ -6,6 +6,7 @@ use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie};
 use crate::engine::render::CancelToken;
+use crate::engine::route::Stop;
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use eframe::egui;
 use num_complex::Complex64;
@@ -109,15 +110,11 @@ struct Estimate {
 #[derive(Clone, PartialEq)]
 struct EstimateKey {
     kind: FractalKind,
-    start_center: Complex64,
-    start_span: f64,
+    stops: Vec<Stop>,
     max_iter: MaxIter,
-    target: Complex64,
-    end_span: f64,
     fps: u32,
     seconds: f64,
     size: (usize, usize),
-    rotation: f64,
     quality: Quality,
 }
 
@@ -279,10 +276,18 @@ impl MovieDialog {
     fn spec(&self, start: &MovieStart) -> MovieSpec {
         MovieSpec {
             kind: start.kind,
-            start_center: start.view.center,
-            start_span: start.view.span,
-            target: self.target,
-            end_span: DEFAULT_SPAN / self.end_magnification,
+            stops: vec![
+                Stop {
+                    center: start.view.center,
+                    span: start.view.span,
+                    rotation: 0.0,
+                },
+                Stop {
+                    center: self.target,
+                    span: DEFAULT_SPAN / self.end_magnification,
+                    rotation: self.rotation,
+                },
+            ],
             fps: self.fps,
             seconds: self.seconds,
             width: self.width,
@@ -290,7 +295,6 @@ impl MovieDialog {
             max_iter: start.max_iter,
             color: start.color,
             output: PathBuf::from(&self.output),
-            rotation: self.rotation,
             quality: self.quality,
         }
     }
@@ -301,15 +305,11 @@ impl MovieDialog {
         let spec = self.spec(start);
         let key = EstimateKey {
             kind: spec.kind,
-            start_center: spec.start_center,
-            start_span: spec.start_span,
+            stops: spec.stops.clone(),
             max_iter: spec.max_iter,
-            target: spec.target,
-            end_span: spec.end_span,
             fps: spec.fps,
             seconds: spec.seconds,
             size: (spec.width, spec.height),
-            rotation: spec.rotation,
             quality: spec.quality,
         };
         if let Some((k, e)) = &self.estimate
@@ -744,9 +744,9 @@ mod tests {
     #[test]
     fn rotation_reaches_the_spec() {
         let mut d = MovieDialog::default();
-        assert_eq!(d.spec(&current()).rotation, 0.0);
+        assert_eq!(d.spec(&current()).stops[1].rotation, 0.0);
         d.rotation = -6.0;
-        assert_eq!(d.spec(&current()).rotation, -6.0);
+        assert_eq!(d.spec(&current()).stops[1].rotation, -6.0);
     }
 
     #[test]
@@ -796,14 +796,14 @@ mod tests {
             MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap(),
         );
         let spec = d.spec(&d.start.unwrap());
-        assert_eq!(spec.start_center, Complex64::new(0.1, 0.2));
-        assert_eq!(spec.start_span, 0.5);
+        assert_eq!(spec.stops[0].center, Complex64::new(0.1, 0.2));
+        assert_eq!(spec.stops[0].span, 0.5);
         assert_eq!(spec.kind, FractalKind::Multibrot { power: 3 });
         assert_eq!(d.start_name.as_deref(), Some("deep"));
 
         d.choose_start(None, d.current.unwrap());
         assert_eq!(
-            d.spec(&d.start.unwrap()).start_center,
+            d.spec(&d.start.unwrap()).stops[0].center,
             Complex64::new(-0.5, 0.0)
         );
         assert_eq!(d.start_name, None);

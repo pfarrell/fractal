@@ -7,7 +7,8 @@ use fractal_explorer::engine::movie::{
     find_program, render_exact_frame, render_movie, rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
-use fractal_explorer::engine::viewport::{MaxIter, Viewport};
+use fractal_explorer::engine::route::Stop;
+use fractal_explorer::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -17,10 +18,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 fn spec(out: PathBuf) -> MovieSpec {
     MovieSpec {
         kind: FractalKind::Mandelbrot,
-        start_center: Complex64::new(-0.5, 0.0),
-        start_span: 3.0,
-        target: Complex64::new(-0.743643887, 0.131825904),
-        end_span: 3.0e-6,
+        stops: vec![
+            Stop {
+                center: Complex64::new(-0.5, 0.0),
+                span: 3.0,
+                rotation: 0.0,
+            },
+            Stop {
+                center: Complex64::new(-0.743643887, 0.131825904),
+                span: 3.0e-6,
+                rotation: 0.0,
+            },
+        ],
         fps: 30,
         seconds: 10.0,
         width: 64,
@@ -28,7 +37,6 @@ fn spec(out: PathBuf) -> MovieSpec {
         max_iter: MaxIter::Auto,
         color: ColorSettings::default(),
         output: out,
-        rotation: 0.0,
         quality: Quality::Exact,
     }
 }
@@ -40,7 +48,7 @@ fn s() -> MovieSpec {
 #[test]
 fn first_frame_is_start() {
     let v = s().frame_view(0);
-    assert_eq!(v.center, s().start_center);
+    assert_eq!(v.center, s().stops[0].center);
     assert_eq!(v.span, 3.0);
     assert_eq!((v.width, v.height), (64, 48));
 }
@@ -76,7 +84,7 @@ fn pixels_apart(
 fn last_frame_is_centered_on_target() {
     let sp = s();
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert!(pixels_apart(&last, last.center, sp.target) < 0.01);
+    assert!(pixels_apart(&last, last.center, sp.stops[1].center) < 0.01);
 }
 
 #[test]
@@ -110,7 +118,7 @@ fn zero_rotation_matches_plain_sampler() {
 #[test]
 fn frame_angle_is_rate_times_time() {
     let mut sp = s();
-    sp.rotation = 6.0;
+    sp.stops[1].rotation = 6.0;
     assert_eq!(sp.frame_angle(0), 0.0);
     let last = sp.frame_angle(sp.frame_count() - 1);
     assert!((last - 60f64.to_radians()).abs() < 1e-12, "{last}");
@@ -121,7 +129,7 @@ fn validate_rejects_non_finite_rotation() {
     let dir = tempfile::tempdir().unwrap();
     for r in [f64::NAN, f64::INFINITY] {
         let mut sp = spec(dir.path().join("o.mp4"));
-        sp.rotation = r;
+        sp.stops[1].rotation = r;
         assert!(matches!(sp.validate(), Err(MovieError::Invalid(_))), "{r}");
     }
 }
@@ -130,11 +138,11 @@ fn validate_rejects_non_finite_rotation() {
 fn off_center_bookmark_end_view_is_hit_exactly() {
     // End view far from the start view's center, as with a bookmark.
     let mut sp = s();
-    sp.start_center = Complex64::new(0.0, 0.0);
-    sp.target = Complex64::new(-1.25, 0.4);
-    sp.end_span = 1e-9;
+    sp.stops[0].center = Complex64::new(0.0, 0.0);
+    sp.stops[1].center = Complex64::new(-1.25, 0.4);
+    sp.stops[1].span = 1e-9;
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert!(pixels_apart(&last, last.center, sp.target) < 0.01);
+    assert!(pixels_apart(&last, last.center, sp.stops[1].center) < 0.01);
     assert!((last.span - 1e-9).abs() < 1e-21);
 }
 
@@ -143,11 +151,11 @@ fn zoom_follows_one_straight_zoom_line() {
     // Every frame is the start view scaled about one fixed point, so that
     // point sits on the same pixel in every frame.
     let mut sp = s();
-    sp.start_center = Complex64::new(0.0, 0.0);
-    sp.target = Complex64::new(-1.25, 0.4);
-    sp.end_span = 1e-3;
-    let r = sp.end_span / sp.start_span;
-    let fixed = (sp.target - sp.start_center * r) / (1.0 - r);
+    sp.stops[0].center = Complex64::new(0.0, 0.0);
+    sp.stops[1].center = Complex64::new(-1.25, 0.4);
+    sp.stops[1].span = 1e-3;
+    let r = sp.stops[1].span / sp.stops[0].span;
+    let fixed = (sp.stops[1].center - sp.stops[0].center * r) / (1.0 - r);
     let first = sp.frame_view(0).complex_to_pixel(fixed);
     for i in 1..sp.frame_count() {
         let (x, y) = sp.frame_view(i).complex_to_pixel(fixed);
@@ -161,13 +169,13 @@ fn zoom_follows_one_straight_zoom_line() {
 #[test]
 fn equal_spans_pan_straight_to_target() {
     let mut sp = s();
-    sp.end_span = sp.start_span;
+    sp.stops[1].span = sp.stops[0].span;
     let n = sp.frame_count();
     let mid = sp.frame_view((n - 1) / 2);
     let last = sp.frame_view(n - 1);
     assert!(mid.center.re.is_finite() && mid.center.im.is_finite());
-    assert!((last.center - sp.target).norm() < 1e-12);
-    assert_eq!(last.span, sp.start_span);
+    assert!((last.center - sp.stops[1].center).norm() < 1e-12);
+    assert_eq!(last.span, sp.stops[0].span);
 }
 
 #[test]
@@ -180,7 +188,7 @@ fn validate_rejects_odd_size_and_bad_fps() {
     fps.fps = 0;
     assert!(matches!(fps.validate(), Err(MovieError::Invalid(_))));
     let mut deep = s();
-    deep.end_span = 1e-20;
+    deep.stops[1].span = 1e-20;
     assert!(matches!(deep.validate(), Err(MovieError::Invalid(_))));
 }
 
@@ -563,16 +571,16 @@ fn validate_rejects_bad_output_paths() {
 
 #[test]
 fn slider_max_end_zoom_is_accepted() {
-    use fractal_explorer::engine::viewport::{DEFAULT_SPAN, min_pixel_scale};
+    use fractal_explorer::engine::viewport::DEFAULT_SPAN;
     // Same computation as the dialog's slider maximum, over many targets.
     for i in 0..6000 {
         let mut sp = s();
         sp.height = 1080;
         sp.width = 1920;
-        sp.target = Complex64::new(-2.0 + i as f64 * 0.000_7, 0.3 - i as f64 * 0.000_11);
-        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(sp.target) * sp.height as f64);
-        sp.end_span = DEFAULT_SPAN / floor_mag;
-        assert!(sp.validate().is_ok(), "target {}", sp.target);
+        sp.stops[1].center = Complex64::new(-2.0 + i as f64 * 0.000_7, 0.3 - i as f64 * 0.000_11);
+        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(sp.stops[1].center) * sp.height as f64);
+        sp.stops[1].span = DEFAULT_SPAN / floor_mag;
+        assert!(sp.validate().is_ok(), "target {}", sp.stops[1].center);
     }
 }
 
@@ -632,7 +640,7 @@ fn missing_ffmpeg_message_says_how_to_fix_it() {
 fn keyframe_spec(out: PathBuf, quality: Quality) -> MovieSpec {
     let mut sp = spec(out);
     sp.seconds = 2.0;
-    sp.rotation = 10.0;
+    sp.stops[1].rotation = 10.0;
     sp.quality = quality;
     sp
 }
@@ -782,5 +790,94 @@ fn cancel_during_a_later_keyframe_keeps_the_earlier_stretch() {
     assert_eq!(frames, first.frames.len());
     if let Some(playable) = decodable_frames(&out) {
         assert_eq!(playable, frames);
+    }
+}
+
+fn stop(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
+    Stop {
+        center: Complex64::new(re, im),
+        span,
+        rotation,
+    }
+}
+
+/// Three stops along one dive, with a turn on each step.
+fn three_stops(out: PathBuf) -> MovieSpec {
+    let mut sp = spec(out);
+    sp.stops = vec![
+        stop(-0.5, 0.0, 3.0, 0.0),
+        stop(-0.75, 0.1, 0.03, 10.0),
+        stop(-0.745, 0.105, 3e-5, -20.0),
+    ];
+    sp
+}
+
+#[test]
+fn three_stop_spec_hits_first_and_last() {
+    let sp = three_stops(PathBuf::from("/tmp/unused.mp4"));
+    let first = sp.frame_view(0);
+    let last = sp.frame_view(sp.frame_count() - 1);
+    assert_eq!((first.center, first.span), (sp.stops[0].center, 3.0));
+    assert_eq!((last.center, last.span), (sp.stops[2].center, 3e-5));
+}
+
+#[test]
+fn validate_rejects_single_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sp = spec(dir.path().join("o.mp4"));
+    sp.stops.truncate(1);
+    match sp.validate() {
+        Err(MovieError::Invalid(m)) => assert!(m.contains("at least two stops"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_zero_length_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sp = spec(dir.path().join("o.mp4"));
+    let again = sp.stops[1];
+    sp.stops.push(again);
+    match sp.validate() {
+        Err(MovieError::Invalid(m)) => assert!(m.contains("same view"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn validate_checks_every_stop_against_precision() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sp = three_stops(dir.path().join("o.mp4"));
+    let c1 = sp.stops[1].center;
+    sp.stops[1].span = min_pixel_scale(c1) * sp.height as f64 * 0.5;
+    sp.stops[2] = stop(-0.75, 0.1001, 1e-3, 0.0);
+    match sp.validate() {
+        Err(MovieError::Invalid(m)) => assert!(m.contains("stop 2"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn fast_and_smooth_three_stop_movie_decodes() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for q in [Quality::Fast, Quality::Smooth] {
+        let out = dir.path().join(format!("{q:?}.mp4"));
+        let mut sp = three_stops(out.clone());
+        sp.seconds = 2.0;
+        sp.quality = q;
+        let r = render_movie(
+            &sp,
+            2,
+            Path::new("ffmpeg"),
+            &CancelToken::never(),
+            &mut |_| {},
+        );
+        assert_eq!(r.unwrap(), out);
+        if let Some(n) = decodable_frames(&out) {
+            assert_eq!(n, sp.frame_count(), "{q:?}");
+        }
     }
 }

@@ -7,19 +7,33 @@ use fractal_explorer::engine::keyframe::{
 };
 use fractal_explorer::engine::movie::{MovieSpec, RotatedSampler};
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, render};
+use fractal_explorer::engine::route::Stop;
 use fractal_explorer::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use std::path::PathBuf;
 
 const TARGET: Complex64 = Complex64::new(-0.743643887, 0.131825904);
 
+/// A two-stop route: start view to end view, turning at `rotation` °/s.
+fn two(c0: Complex64, s0: f64, c1: Complex64, s1: f64, rotation: f64) -> Vec<Stop> {
+    vec![
+        Stop {
+            center: c0,
+            span: s0,
+            rotation: 0.0,
+        },
+        Stop {
+            center: c1,
+            span: s1,
+            rotation,
+        },
+    ]
+}
+
 fn base(quality: Quality) -> MovieSpec {
     MovieSpec {
         kind: FractalKind::Mandelbrot,
-        start_center: Complex64::new(-0.5, 0.0),
-        start_span: 3.0,
-        target: TARGET,
-        end_span: 3e-9,
+        stops: two(Complex64::new(-0.5, 0.0), 3.0, TARGET, 3e-9, 0.0),
         fps: 30,
         seconds: 30.0,
         width: 160,
@@ -27,7 +41,6 @@ fn base(quality: Quality) -> MovieSpec {
         max_iter: MaxIter::Auto,
         color: ColorSettings::default(),
         output: PathBuf::from("/tmp/unused.mp4"),
-        rotation: 0.0,
         quality,
     }
 }
@@ -36,21 +49,21 @@ fn base(quality: Quality) -> MovieSpec {
 fn specs(quality: Quality) -> Vec<(&'static str, MovieSpec)> {
     let zoom_in = base(quality);
     let zoom_out = MovieSpec {
-        start_center: TARGET,
-        target: Complex64::new(-0.5, 0.0),
-        start_span: 3e-9,
-        end_span: 3.0,
+        stops: two(TARGET, 3e-9, Complex64::new(-0.5, 0.0), 3.0, 0.0),
         ..base(quality)
     };
     let pan = MovieSpec {
-        start_center: Complex64::new(-1.5, -0.8),
-        target: Complex64::new(0.4, 0.9),
-        start_span: 0.01,
-        end_span: 0.01,
+        stops: two(
+            Complex64::new(-1.5, -0.8),
+            0.01,
+            Complex64::new(0.4, 0.9),
+            0.01,
+            0.0,
+        ),
         ..base(quality)
     };
     let turning = MovieSpec {
-        rotation: 12.0,
+        stops: two(Complex64::new(-0.5, 0.0), 3.0, TARGET, 3e-9, 12.0),
         ..base(quality)
     };
     let two_frames = MovieSpec {
@@ -148,7 +161,7 @@ fn every_frame_lies_inside_its_keyframe() {
 #[test]
 fn frame_corners_follow_rotation() {
     let spec = MovieSpec {
-        rotation: 90.0,
+        stops: two(Complex64::new(-0.5, 0.0), 3.0, TARGET, 3e-9, 90.0),
         seconds: 1.0,
         ..base(Quality::Exact)
     };
@@ -204,7 +217,13 @@ fn stretch_iterations_are_the_deepest_frames() {
 #[test]
 fn density_clamped_at_precision_floor() {
     let spec = MovieSpec {
-        end_span: min_pixel_scale(TARGET) * 90.0,
+        stops: two(
+            Complex64::new(-0.5, 0.0),
+            3.0,
+            TARGET,
+            min_pixel_scale(TARGET) * 90.0,
+            0.0,
+        ),
         ..base(Quality::Smooth)
     };
     let blocks = plan(&spec, 2, KEYFRAME_MAX_PIXELS);
@@ -253,7 +272,7 @@ fn hd(seconds: f64, fps: u32) -> MovieSpec {
         height: 1080,
         seconds,
         fps,
-        end_span,
+        stops: two(Complex64::new(-0.5, 0.0), 3.0, TARGET, end_span, 0.0),
         ..base(Quality::Smooth)
     }
 }
@@ -484,15 +503,11 @@ fn frame_cutoff_applies() {
 /// A short zoom into seahorse valley at 96×54.
 fn seahorse(quality: Quality, rotation: f64) -> MovieSpec {
     MovieSpec {
-        start_center: SEAHORSE,
-        target: SEAHORSE,
-        start_span: 0.05,
-        end_span: 0.002,
+        stops: two(SEAHORSE, 0.05, SEAHORSE, 0.002, rotation),
         fps: 10,
         seconds: 2.0,
         width: 96,
         height: 54,
-        rotation,
         ..base(quality)
     }
 }
