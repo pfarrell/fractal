@@ -30,6 +30,7 @@ fn base(quality: Quality) -> MovieSpec {
         path: CameraPath::Straight,
         rotation: 0.0,
         quality,
+        music: Vec::new(),
     }
 }
 

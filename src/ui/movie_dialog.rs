@@ -298,6 +298,7 @@ impl MovieDialog {
             path: self.path,
             rotation: self.rotation,
             quality: self.quality,
+            music: Vec::new(),
         }
     }
 
@@ -341,11 +342,11 @@ impl MovieDialog {
         std::thread::spawn(move || {
             let ptx = tx.clone();
             let pctx = ctx.clone();
-            let result = render_movie(&spec, threads, &ffmpeg, &token, &mut |p| {
+            let result = render_movie(&spec, threads, &ffmpeg, None, &token, &mut |p| {
                 let _ = ptx.send(Msg::Progress(p));
                 pctx.request_repaint();
             });
-            let _ = tx.send(Msg::Finished(result));
+            let _ = tx.send(Msg::Finished(result.map(|s| s.path)));
             ctx.request_repaint();
         });
         self.job = Some(MovieJob { rx, generation });
@@ -382,7 +383,9 @@ impl MovieDialog {
                         *keyframe = Some((done, k));
                     }
                 }
-                Msg::Progress(MovieProgress::Encoding) => self.status = Status::Encoding,
+                Msg::Progress(MovieProgress::Encoding | MovieProgress::AddingMusic) => {
+                    self.status = Status::Encoding
+                }
                 Msg::Progress(MovieProgress::Done(_)) => {}
                 Msg::Finished(Ok(path)) => {
                     self.status = Status::Done(path);
