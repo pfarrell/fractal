@@ -2,7 +2,7 @@ use fractal_explorer::engine::color::{ColorSettings, Palette, colorize};
 use fractal_explorer::engine::escape::{FractalKind, Sample};
 use fractal_explorer::engine::keyframe::{
     Block, KEYFRAME_MAX_PIXELS, Keyframe, Quality, Stretch, TAP_COST, estimated_cost, frame_work,
-    keyframe_work, linear_to_srgb, pack, plan, planned_work, render_keyframe, resample,
+    keyframe_work, linear_to_srgb, pack, plan, plan_range, planned_work, render_keyframe, resample,
     srgb_to_linear, tap_color,
 };
 use fractal_explorer::engine::movie::{MovieSpec, RotatedSampler};
@@ -598,4 +598,46 @@ fn no_pulse_between_keyframes() {
             );
         }
     }
+}
+
+#[test]
+fn plan_range_over_all_frames_is_plan() {
+    for (name, s) in specs(Quality::Smooth) {
+        let all = plan_range(&s, 0..s.frame_count(), 2, KEYFRAME_MAX_PIXELS);
+        assert_eq!(all, plan(&s, 2, KEYFRAME_MAX_PIXELS), "{name}");
+    }
+}
+
+#[test]
+fn plan_range_covers_exactly_the_range() {
+    for (name, mut s) in specs(Quality::Smooth) {
+        (s.fps, s.seconds) = (30, 4.0); // 120 frames
+        assert_eq!(s.frame_count(), 120);
+        let blocks = plan_range(&s, 40..95, 2, KEYFRAME_MAX_PIXELS);
+        let covered: Vec<usize> = blocks.iter().flat_map(range).collect();
+        assert_eq!(covered, (40..95).collect::<Vec<_>>(), "{name}");
+        for st in stretches(&blocks) {
+            let (lo, hi) = (
+                st.view.pixel_to_complex(0.0, st.view.height as f64),
+                st.view.pixel_to_complex(st.view.width as f64, 0.0),
+            );
+            for i in st.frames.clone() {
+                for c in s.frame_corners(i) {
+                    assert!(
+                        c.re >= lo.re.min(hi.re)
+                            && c.re <= lo.re.max(hi.re)
+                            && c.im >= lo.im.min(hi.im)
+                            && c.im <= lo.im.max(hi.im),
+                        "{name}: frame {i} corner outside its keyframe"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn plan_range_of_empty_range_is_empty() {
+    let s = base(Quality::Smooth);
+    assert!(plan_range(&s, 7..7, 2, KEYFRAME_MAX_PIXELS).is_empty());
 }

@@ -135,9 +135,15 @@ fn fits(view: &Viewport, max_pixels: usize) -> bool {
 /// frame whose keyframe is too big even alone drops to `q` = 1, and
 /// failing that is rendered Exact. The blocks cover every frame in order.
 pub fn plan(spec: &MovieSpec, q: u32, max_pixels: usize) -> Vec<Block> {
-    let (n, h) = (spec.frame_count(), spec.height);
+    plan_range(spec, 0..spec.frame_count(), q, max_pixels)
+}
+
+/// [`plan`] for the frames in `frames` only: the blocks cover exactly
+/// that range, in order.
+pub fn plan_range(spec: &MovieSpec, frames: Range<usize>, q: u32, max_pixels: usize) -> Vec<Block> {
+    let (n, h) = (frames.end.min(spec.frame_count()), spec.height);
     let mut blocks = Vec::new();
-    let mut i = 0;
+    let mut i = frames.start;
     while i < n {
         let mut bounds = Bounds::of(spec, i);
         let Some(q) = [q, 1]
