@@ -1,14 +1,20 @@
 use fractal_explorer::engine::color::ColorSettings;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::keyframe::Quality;
+use fractal_explorer::engine::movie::MovieError;
 use fractal_explorer::engine::movie::MovieSpec;
 use fractal_explorer::engine::preview::{
-    PREVIEW_FPS, fingerprint, frame_at_time, preview_size, preview_spec, runs_to_render, window_at,
+    PREVIEW_FPS, PreviewMsg, fingerprint, frame_at_time, preview_size, preview_spec,
+    runs_to_render, spawn_preview, window_at,
 };
+use fractal_explorer::engine::render::CancelToken;
 use fractal_explorer::engine::route::{JOINT_HALF_WIDTH_S, Stop};
 use fractal_explorer::engine::viewport::MaxIter;
 use num_complex::Complex64;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::mpsc::channel;
 
 fn st(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
     Stop {
@@ -130,4 +136,83 @@ fn frame_at_time_inverts_frame_time() {
     }
     assert_eq!(frame_at_time(&p, -3.0), 0);
     assert_eq!(frame_at_time(&p, 99.0), p.frame_count() - 1);
+}
+
+/// A tiny, short preview: 64×36, 2 s at 12 fps.
+fn tiny() -> MovieSpec {
+    let mut f = folder(2.0);
+    (f.width, f.height) = (64, 36);
+    preview_spec(&f)
+}
+
+fn collect(
+    spec: MovieSpec,
+    runs: Vec<std::ops::Range<usize>>,
+    cancel: CancelToken,
+) -> Vec<PreviewMsg> {
+    let (tx, rx) = channel();
+    let job = spawn_preview(spec, runs, 2, cancel, tx, || {});
+    let mut msgs = Vec::new();
+    for m in rx {
+        let done = matches!(m, PreviewMsg::Finished { .. });
+        msgs.push(m);
+        if done {
+            break;
+        }
+    }
+    job.join().unwrap();
+    msgs
+}
+
+#[test]
+fn preview_job_renders_only_the_runs() {
+    let spec = tiny();
+    let (w, h) = (spec.width, spec.height);
+    let cancel = CancelToken::new(Arc::new(AtomicU64::new(5)), 5);
+    let msgs = collect(spec, vec![0..4, 9..12], cancel);
+    let mut frames = Vec::new();
+    let mut last_progress = None;
+    let mut finished = None;
+    for m in msgs {
+        match m {
+            PreviewMsg::Frame {
+                generation,
+                index,
+                rgb,
+            } => {
+                assert_eq!(generation, 5);
+                assert_eq!(rgb.len(), w * h * 3);
+                frames.push(index);
+            }
+            PreviewMsg::Progress {
+                generation,
+                done,
+                total,
+            } => {
+                assert_eq!(generation, 5);
+                last_progress = Some((done, total));
+            }
+            PreviewMsg::Finished { generation, result } => {
+                assert_eq!(generation, 5);
+                finished = Some(result.is_ok());
+            }
+        }
+    }
+    assert_eq!(frames, vec![0, 1, 2, 3, 9, 10, 11]);
+    assert_eq!(last_progress, Some((7, 7)));
+    assert_eq!(finished, Some(true));
+}
+
+#[test]
+fn preview_job_stops_on_cancel() {
+    let cancel = CancelToken::new(Arc::new(AtomicU64::new(1)), 0);
+    let msgs = collect(tiny(), vec![0..10], cancel);
+    assert!(!msgs.iter().any(|m| matches!(m, PreviewMsg::Frame { .. })));
+    assert!(matches!(
+        msgs.last(),
+        Some(PreviewMsg::Finished {
+            result: Err(MovieError::Cancelled { .. }),
+            ..
+        })
+    ));
 }

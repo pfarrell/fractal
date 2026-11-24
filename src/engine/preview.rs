@@ -4,9 +4,13 @@
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::Quality;
-use crate::engine::movie::MovieSpec;
+use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, render_range};
+use crate::engine::render::CancelToken;
 use num_complex::Complex64;
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 
 /// A preview fits the final movie's shape inside this box.
 pub const PREVIEW_BOX: (usize, usize) = (320, 180);
@@ -95,4 +99,83 @@ pub fn runs_to_render(window: Range<usize>, have: impl Fn(usize) -> bool) -> Vec
         }
     }
     runs
+}
+
+/// Messages from a preview job, tagged with its cancel token's
+/// generation so a replaced job's late messages can be ignored.
+pub enum PreviewMsg {
+    /// Frame `index`, RGB, `width × height × 3` bytes.
+    Frame {
+        generation: u64,
+        index: usize,
+        rgb: Arc<[u8]>,
+    },
+    /// `done` of `total` frames (over all runs) are out.
+    Progress {
+        generation: u64,
+        done: usize,
+        total: usize,
+    },
+    Finished {
+        generation: u64,
+        result: Result<(), MovieError>,
+    },
+}
+
+/// Render `runs` of `spec`'s frames on a thread of their own with
+/// `threads` workers, sending each frame as it is done. `wake` is called
+/// after every message (to repaint the UI).
+pub fn spawn_preview(
+    spec: MovieSpec,
+    runs: Vec<Range<usize>>,
+    threads: usize,
+    cancel: CancelToken,
+    tx: Sender<PreviewMsg>,
+    wake: impl Fn() + Send + 'static,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let generation = cancel.generation();
+        let total: usize = runs.iter().map(|r| r.len()).sum();
+        let send = |m: PreviewMsg| {
+            let _ = tx.send(m);
+            wake();
+        };
+        let result = (|| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads.max(1))
+                .build()
+                .map_err(|e| MovieError::Invalid(e.to_string()))?;
+            let mut done = 0;
+            for run in runs {
+                if cancel.is_cancelled() {
+                    return Err(MovieError::Cancelled { kept: None });
+                }
+                render_range(
+                    &spec,
+                    run,
+                    &pool,
+                    &cancel,
+                    &mut |index, pixels| {
+                        let rgb: Arc<[u8]> =
+                            pixels.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+                        send(PreviewMsg::Frame {
+                            generation,
+                            index,
+                            rgb,
+                        });
+                        done += 1;
+                        send(PreviewMsg::Progress {
+                            generation,
+                            done,
+                            total,
+                        });
+                        true
+                    },
+                    &mut |_: MovieProgress| {},
+                )?;
+            }
+            Ok(())
+        })();
+        send(PreviewMsg::Finished { generation, result });
+    })
 }
