@@ -5,9 +5,10 @@ use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{
-    CameraPath, MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie,
+    CameraPath, MovieError, MovieProgress, MovieSpec, Saved, find_ffmpeg, render_movie,
 };
 use crate::engine::render::CancelToken;
+use crate::engine::soundtrack::{CROSSFADE_S, find_ffprobe, probe_duration};
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use eframe::egui;
 use num_complex::Complex64;
@@ -19,7 +20,7 @@ use std::sync::mpsc::{Receiver, channel};
 /// Messages from the movie thread.
 enum Msg {
     Progress(MovieProgress),
-    Finished(Result<PathBuf, MovieError>),
+    Finished(Result<Saved, MovieError>),
 }
 
 struct MovieJob {
@@ -39,10 +40,19 @@ enum Status {
         keyframe: Option<(usize, usize)>,
     },
     Encoding,
-    Done(PathBuf),
+    AddingMusic,
+    /// Saved; the reason the music isn't in it, if it isn't.
+    Done(PathBuf, Option<String>),
     /// Cancelled; says whether the frames so far were kept.
     Cancelled(String),
     Failed(String),
+}
+
+/// A music track chosen for the movie, with its length or why it can't
+/// be read.
+struct Track {
+    path: PathBuf,
+    probed: Result<f64, String>,
 }
 
 /// The explorer state a movie starts from.
@@ -195,6 +205,10 @@ pub struct MovieDialog {
     job: Option<MovieJob>,
     /// ffmpeg's location, looked up when the dialog opens.
     ffmpeg: Option<PathBuf>,
+    /// ffprobe's location, needed to read music.
+    ffprobe: Option<PathBuf>,
+    /// Music to add, in play order.
+    music: Vec<Track>,
 }
 
 fn default_output() -> String {
@@ -233,6 +247,8 @@ impl Default for MovieDialog {
             status: Status::Idle,
             job: None,
             ffmpeg: None,
+            ffprobe: None,
+            music: Vec::new(),
         }
     }
 }
@@ -251,7 +267,57 @@ impl MovieDialog {
         self.target = start.view.center;
         self.output = default_output();
         self.status = Status::Idle;
+        self.find_tools();
+    }
+
+    /// Look up ffmpeg and ffprobe: either may have been installed since.
+    fn find_tools(&mut self) {
         self.ffmpeg = find_ffmpeg();
+        self.ffprobe = self.ffmpeg.as_deref().and_then(find_ffprobe);
+    }
+
+    /// Append tracks, reading each one's length now.
+    fn add_tracks(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            let probed = match &self.ffprobe {
+                Some(ffprobe) => probe_duration(ffprobe, &path),
+                None => Err("ffprobe not found".into()),
+            };
+            self.music.push(Track { path, probed });
+        }
+    }
+
+    /// Swap track `i` with the one above (`up`) or below; no-op at the ends.
+    fn move_track(&mut self, i: usize, up: bool) {
+        let j = if up { i.checked_sub(1) } else { Some(i + 1) };
+        if let Some(j) = j.filter(|&j| j < self.music.len()) {
+            self.music.swap(i, j);
+        }
+    }
+
+    /// How the music will play, when there is any.
+    fn music_summary(&self) -> Option<String> {
+        if self.music.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Plays in order with {CROSSFADE_S} s crossfades, looping to fill {}.",
+            format_duration(self.seconds)
+        ))
+    }
+
+    /// Why the chosen music stops a render, if it does.
+    fn music_blocker(&self) -> Option<MovieError> {
+        if self.music.is_empty() {
+            return None;
+        }
+        if self.ffprobe.is_none() {
+            return Some(MovieError::FfprobeMissing);
+        }
+        self.music
+            .iter()
+            .find_map(|t| t.probed.as_ref().err())
+            .map(|e| MovieError::Invalid(format!("remove the unreadable track ({e})")))
     }
 
     /// Start the movie from `start`; `name` is its bookmark (`None` = the
@@ -298,7 +364,7 @@ impl MovieDialog {
             path: self.path,
             rotation: self.rotation,
             quality: self.quality,
-            music: Vec::new(),
+            music: self.music.iter().map(|t| t.path.clone()).collect(),
         }
     }
 
@@ -335,6 +401,7 @@ impl MovieDialog {
     }
 
     fn launch(&mut self, spec: MovieSpec, ffmpeg: PathBuf, threads: usize, ctx: &egui::Context) {
+        let ffprobe = self.ffprobe.clone();
         let (tx, rx) = channel();
         let generation = Arc::new(AtomicU64::new(0));
         let token = CancelToken::new(generation.clone(), 0);
@@ -342,11 +409,18 @@ impl MovieDialog {
         std::thread::spawn(move || {
             let ptx = tx.clone();
             let pctx = ctx.clone();
-            let result = render_movie(&spec, threads, &ffmpeg, None, &token, &mut |p| {
-                let _ = ptx.send(Msg::Progress(p));
-                pctx.request_repaint();
-            });
-            let _ = tx.send(Msg::Finished(result.map(|s| s.path)));
+            let result = render_movie(
+                &spec,
+                threads,
+                &ffmpeg,
+                ffprobe.as_deref(),
+                &token,
+                &mut |p| {
+                    let _ = ptx.send(Msg::Progress(p));
+                    pctx.request_repaint();
+                },
+            );
+            let _ = tx.send(Msg::Finished(result));
             ctx.request_repaint();
         });
         self.job = Some(MovieJob { rx, generation });
@@ -383,12 +457,11 @@ impl MovieDialog {
                         *keyframe = Some((done, k));
                     }
                 }
-                Msg::Progress(MovieProgress::Encoding | MovieProgress::AddingMusic) => {
-                    self.status = Status::Encoding
-                }
+                Msg::Progress(MovieProgress::Encoding) => self.status = Status::Encoding,
+                Msg::Progress(MovieProgress::AddingMusic) => self.status = Status::AddingMusic,
                 Msg::Progress(MovieProgress::Done(_)) => {}
-                Msg::Finished(Ok(path)) => {
-                    self.status = Status::Done(path);
+                Msg::Finished(Ok(saved)) => {
+                    self.status = Status::Done(saved.path, saved.music_error);
                     finished = true;
                 }
                 Msg::Finished(Err(e @ MovieError::Cancelled { .. })) => {
@@ -437,6 +510,12 @@ impl MovieDialog {
             if self.ffmpeg.is_none() && !matches!(self.status, Status::Failed(_)) {
                 ui.colored_label(WARNING, MovieError::FfmpegMissing.to_string());
             }
+            if !self.music.is_empty()
+                && self.ffprobe.is_none()
+                && !matches!(self.status, Status::Failed(_))
+            {
+                ui.colored_label(WARNING, MovieError::FfprobeMissing.to_string());
+            }
             self.status_ui(ui);
             ui.horizontal(|ui| {
                 if running {
@@ -448,10 +527,11 @@ impl MovieDialog {
                 } else {
                     if ui.button("Render").clicked() {
                         // Look again: ffmpeg may have been installed meanwhile.
-                        self.ffmpeg = find_ffmpeg();
+                        self.find_tools();
                         let spec = self.spec(&start);
                         let checked = spec
                             .validate()
+                            .and_then(|()| self.music_blocker().map_or(Ok(()), Err))
                             .and_then(|()| self.ffmpeg.clone().ok_or(MovieError::FfmpegMissing));
                         match checked {
                             Ok(ffmpeg) => self.launch(spec, ffmpeg, threads, ctx),
@@ -610,7 +690,66 @@ impl MovieDialog {
                 ui.label("Save to");
                 ui.text_edit_singleline(&mut self.output);
                 ui.end_row();
+                ui.label("Music");
+                ui.vertical(|ui| self.music_ui(ui));
+                ui.end_row();
             });
+    }
+
+    /// The track list, in play order, and the button that adds to it.
+    fn music_ui(&mut self, ui: &mut egui::Ui) {
+        enum Edit {
+            Move(usize, bool),
+            Remove(usize),
+        }
+        let mut edit = None;
+        let last = self.music.len().saturating_sub(1);
+        for (i, t) in self.music.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let name = t.path.file_name().unwrap_or(t.path.as_os_str());
+                ui.label(name.to_string_lossy());
+                match &t.probed {
+                    Ok(secs) => ui.weak(format_duration(*secs)),
+                    Err(e) => ui.colored_label(WARNING, e),
+                };
+                if ui
+                    .add_enabled(i > 0, egui::Button::new("↑").small())
+                    .clicked()
+                {
+                    edit = Some(Edit::Move(i, true));
+                }
+                if ui
+                    .add_enabled(i < last, egui::Button::new("↓").small())
+                    .clicked()
+                {
+                    edit = Some(Edit::Move(i, false));
+                }
+                if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                    edit = Some(Edit::Remove(i));
+                }
+            });
+        }
+        match edit {
+            Some(Edit::Move(i, up)) => self.move_track(i, up),
+            Some(Edit::Remove(i)) => {
+                self.music.remove(i);
+            }
+            None => {}
+        }
+        if ui.button("Add music…").clicked()
+            && let Some(paths) = rfd::FileDialog::new()
+                .add_filter(
+                    "Audio",
+                    &["mp3", "m4a", "aac", "flac", "wav", "ogg", "opus"],
+                )
+                .add_filter("All files", &["*"])
+                .pick_files()
+        {
+            self.add_tracks(paths);
+        }
+        if let Some(summary) = self.music_summary() {
+            ui.small(summary);
+        }
     }
 
     /// "Start" row: the current view or any escape-time bookmark.
@@ -672,8 +811,15 @@ impl MovieDialog {
             Status::Encoding => {
                 ui.add(egui::ProgressBar::new(1.0).text("finishing encoding…"));
             }
-            Status::Done(path) => {
+            Status::AddingMusic => {
+                ui.add(egui::ProgressBar::new(1.0).text("adding music…"));
+            }
+            Status::Done(path, None) => {
                 ui.label(format!("Saved {}", path.display()));
+            }
+            Status::Done(path, Some(e)) => {
+                ui.label(format!("Saved {} without music:", path.display()));
+                ui.colored_label(WARNING, e);
             }
             Status::Cancelled(msg) => {
                 ui.label(msg);
@@ -834,5 +980,70 @@ mod tests {
             Complex64::new(-0.5, 0.0)
         );
         assert_eq!(d.start_name, None);
+    }
+
+    fn track(name: &str, probed: Result<f64, String>) -> Track {
+        Track {
+            path: PathBuf::from(name),
+            probed,
+        }
+    }
+
+    #[test]
+    fn music_reaches_the_spec_in_order() {
+        let mut d = MovieDialog {
+            music: vec![track("a.mp3", Ok(60.0)), track("b.mp3", Ok(30.0))],
+            ..MovieDialog::default()
+        };
+        d.move_track(1, true);
+        assert_eq!(
+            d.spec(&current()).music,
+            [PathBuf::from("b.mp3"), PathBuf::from("a.mp3")]
+        );
+    }
+
+    #[test]
+    fn move_track_ignores_the_ends() {
+        let mut d = MovieDialog {
+            music: vec![track("a.mp3", Ok(60.0)), track("b.mp3", Ok(30.0))],
+            ..MovieDialog::default()
+        };
+        d.move_track(0, true);
+        d.move_track(1, false);
+        let names: Vec<_> = d.music.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(names, [PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]);
+    }
+
+    #[test]
+    fn summary_names_crossfade_and_length() {
+        let mut d = MovieDialog {
+            seconds: 1200.0,
+            ..MovieDialog::default()
+        };
+        assert_eq!(d.music_summary(), None);
+        d.music = vec![track("a.mp3", Ok(60.0))];
+        assert_eq!(
+            d.music_summary().as_deref(),
+            Some("Plays in order with 4 s crossfades, looping to fill 20 min 00 s.")
+        );
+    }
+
+    #[test]
+    fn unreadable_track_blocks_render() {
+        let mut d = MovieDialog::default();
+        assert!(d.music_blocker().is_none());
+        d.ffprobe = Some(PathBuf::from("ffprobe"));
+        d.music = vec![track("x.mp3", Err("x.mp3: can't be read".into()))];
+        let Some(MovieError::Invalid(m)) = d.music_blocker() else {
+            panic!("want Invalid");
+        };
+        assert!(m.contains("x.mp3"), "{m}");
+        d.music = vec![track("a.mp3", Ok(60.0))];
+        assert!(d.music_blocker().is_none());
+        d.ffprobe = None;
+        assert!(matches!(
+            d.music_blocker(),
+            Some(MovieError::FfprobeMissing)
+        ));
     }
 }
