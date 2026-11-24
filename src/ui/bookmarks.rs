@@ -1,6 +1,9 @@
-//! The bookmarks window.
+//! The bookmarks window: unfiled bookmarks, then one section per folder,
+//! each in zoom order (the order a folder plays as a movie path).
 
-use crate::engine::bookmark::{Bookmark, BookmarkError, BookmarkStore, BookmarkView};
+use crate::engine::bookmark::{
+    Bookmark, BookmarkError, BookmarkStore, BookmarkView, folder_order, folders,
+};
 use eframe::egui;
 
 pub struct BookmarksUi {
@@ -13,6 +16,18 @@ pub struct BookmarksUi {
     /// The last save failed (the list stays usable).
     save_error: Option<String>,
     name: String,
+    /// Folder "Save current" files into.
+    save_folder: FolderChoice,
+    /// Name typed for a new folder (save row and move menus share it).
+    new_folder: String,
+}
+
+/// Where a bookmark goes.
+#[derive(Clone, Debug, PartialEq)]
+enum FolderChoice {
+    Unfiled,
+    Existing(String),
+    New,
 }
 
 impl Default for BookmarksUi {
@@ -34,6 +49,8 @@ impl BookmarksUi {
             load_error: error,
             save_error: None,
             name: String::new(),
+            save_folder: FolderChoice::Unfiled,
+            new_folder: String::new(),
         }
     }
 
@@ -42,11 +59,11 @@ impl BookmarksUi {
     }
 
     /// Add a bookmark and save. A non-saveable bookmark is not kept.
-    pub fn add(&mut self, name: String, view: BookmarkView) {
+    pub fn add(&mut self, name: String, view: BookmarkView, folder: Option<String>) {
         self.items.push(Bookmark {
             name,
             view,
-            folder: None,
+            folder,
             rotation: 0.0,
         });
         match self.store.save(&self.items) {
@@ -63,6 +80,24 @@ impl BookmarksUi {
     pub fn delete(&mut self, i: usize) {
         self.items.remove(i);
         self.persist();
+    }
+
+    /// File bookmark `i` in `folder` (`None` = unfiled) and save.
+    pub fn set_folder(&mut self, i: usize, folder: Option<String>) {
+        self.items[i].folder = folder;
+        self.persist();
+    }
+
+    /// Set the rotation (°/s) of the step arriving at bookmark `i`, and save.
+    pub fn set_rotation(&mut self, i: usize, deg_per_s: f64) {
+        self.items[i].rotation = deg_per_s;
+        self.persist();
+    }
+
+    /// The new-folder name, if one has been typed.
+    fn typed_folder(&self) -> Option<String> {
+        let name = self.new_folder.trim();
+        (!name.is_empty()).then(|| name.to_string())
     }
 
     /// Show the window. `current` describes the picture on screen now.
@@ -98,39 +133,30 @@ impl BookmarksUi {
                     }
                     return;
                 }
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.name);
-                    let name = self.name.trim().to_string();
-                    if ui
-                        .add_enabled(!name.is_empty(), egui::Button::new("Save current"))
-                        .clicked()
-                    {
-                        self.add(name, current());
-                        self.name.clear();
-                    }
-                });
+                let names = folders(&self.items);
+                self.save_row(ui, &names, current);
                 ui.separator();
-                let mut delete = None;
-                for (i, b) in self.items.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        let kind = match &b.view {
-                            BookmarkView::Escape { kind, .. } => kind.label().to_string(),
-                            BookmarkView::Ifs { system, .. } => system.name.clone(),
-                        };
-                        if ui.button("Go").clicked() {
-                            go = Some(b.view.clone());
-                        }
-                        if ui.button("🗑").on_hover_text("Delete").clicked() {
-                            delete = Some(i);
-                        }
-                        ui.label(format!("{}  ({kind})", b.name));
-                    });
+                let mut action = None;
+                for i in folder_order(&self.items, None) {
+                    self.row(ui, i, &names, &mut go, &mut action);
+                }
+                for f in &names {
+                    egui::CollapsingHeader::new(format!("📁 {f}"))
+                        .id_salt(("bookmark_folder", f))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for i in folder_order(&self.items, Some(f)) {
+                                self.row(ui, i, &names, &mut go, &mut action);
+                            }
+                        });
                 }
                 if self.items.is_empty() {
                     ui.label("No bookmarks yet.");
                 }
-                if let Some(i) = delete {
-                    self.delete(i);
+                match action {
+                    Some(RowAction::Delete(i)) => self.delete(i),
+                    Some(RowAction::Move(i, f)) => self.set_folder(i, f),
+                    None => {}
                 }
                 if let Some(err) = &self.save_error {
                     ui.colored_label(egui::Color32::from_rgb(240, 170, 40), err);
@@ -139,6 +165,126 @@ impl BookmarksUi {
         self.open = open;
         go
     }
+
+    /// Name, folder and "Save current".
+    fn save_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        names: &[String],
+        current: impl FnOnce() -> BookmarkView,
+    ) {
+        if let FolderChoice::Existing(f) = &self.save_folder
+            && !names.contains(f)
+        {
+            self.save_folder = FolderChoice::Unfiled;
+        }
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.name);
+            let label = match &self.save_folder {
+                FolderChoice::Unfiled => "Unfiled".to_string(),
+                FolderChoice::Existing(f) => f.clone(),
+                FolderChoice::New => "New folder…".to_string(),
+            };
+            egui::ComboBox::from_id_salt("bookmark_save_folder")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.save_folder, FolderChoice::Unfiled, "Unfiled");
+                    for f in names {
+                        ui.selectable_value(
+                            &mut self.save_folder,
+                            FolderChoice::Existing(f.clone()),
+                            f,
+                        );
+                    }
+                    ui.selectable_value(&mut self.save_folder, FolderChoice::New, "New folder…");
+                });
+        });
+        ui.horizontal(|ui| {
+            let folder = match &self.save_folder {
+                FolderChoice::Unfiled => Some(None),
+                FolderChoice::Existing(f) => Some(Some(f.clone())),
+                FolderChoice::New => {
+                    ui.label("Folder name");
+                    ui.text_edit_singleline(&mut self.new_folder);
+                    self.typed_folder().map(Some)
+                }
+            };
+            let name = self.name.trim().to_string();
+            let ready = !name.is_empty() && folder.is_some();
+            if ui
+                .add_enabled(ready, egui::Button::new("Save current"))
+                .clicked()
+                && let Some(folder) = folder
+            {
+                if self.save_folder == FolderChoice::New {
+                    self.save_folder = FolderChoice::Existing(folder.clone().unwrap_or_default());
+                    self.new_folder.clear();
+                }
+                self.add(name, current(), folder);
+                self.name.clear();
+            }
+        });
+    }
+
+    /// One bookmark: Go, delete, move, and its label.
+    fn row(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        names: &[String],
+        go: &mut Option<BookmarkView>,
+        action: &mut Option<RowAction>,
+    ) {
+        let b = &self.items[i];
+        let kind = match &b.view {
+            BookmarkView::Escape { kind, .. } => kind.label().to_string(),
+            BookmarkView::Ifs { system, .. } => system.name.clone(),
+        };
+        let magnification = crate::engine::viewport::DEFAULT_SPAN / b.view.span();
+        let label = format!("{}  ({kind})  ×{magnification:.1e}", b.name);
+        let here = b.folder.clone();
+        ui.horizontal(|ui| {
+            if ui.button("Go").clicked() {
+                *go = Some(self.items[i].view.clone());
+            }
+            if ui.button("🗑").on_hover_text("Delete").clicked() {
+                *action = Some(RowAction::Delete(i));
+            }
+            ui.menu_button("📁", |ui| {
+                if here.is_some() && ui.button("Unfiled").clicked() {
+                    *action = Some(RowAction::Move(i, None));
+                    ui.close();
+                }
+                for f in names {
+                    if here.as_ref() != Some(f) && ui.button(f).clicked() {
+                        *action = Some(RowAction::Move(i, Some(f.clone())));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.new_folder);
+                    let typed = self.typed_folder();
+                    if ui
+                        .add_enabled(typed.is_some(), egui::Button::new("New folder"))
+                        .clicked()
+                    {
+                        *action = Some(RowAction::Move(i, typed));
+                        self.new_folder.clear();
+                        ui.close();
+                    }
+                });
+            })
+            .response
+            .on_hover_text("Move to folder");
+            ui.label(label);
+        });
+    }
+}
+
+enum RowAction {
+    Delete(usize),
+    Move(usize, Option<String>),
 }
 
 #[cfg(test)]
@@ -162,9 +308,47 @@ mod tests {
     #[test]
     fn failed_save_keeps_list_and_is_not_a_load_error() {
         let mut ui = BookmarksUi::with_store(BookmarkStore::new("/proc/no/bookmarks.json".into()));
-        ui.add("home".into(), view());
+        ui.add("home".into(), view(), None);
         assert_eq!(ui.items.len(), 1);
         assert!(ui.load_error.is_none());
         assert!(ui.save_error.is_some());
+    }
+
+    fn temp_ui() -> (tempfile::TempDir, BookmarksUi) {
+        let dir = tempfile::tempdir().unwrap();
+        let ui = BookmarksUi::with_store(BookmarkStore::new(dir.path().join("b.json")));
+        (dir, ui)
+    }
+
+    fn reloaded(dir: &tempfile::TempDir) -> Vec<Bookmark> {
+        BookmarkStore::new(dir.path().join("b.json"))
+            .load()
+            .unwrap()
+    }
+
+    #[test]
+    fn add_into_folder_persists() {
+        let (dir, mut ui) = temp_ui();
+        ui.add("home".into(), view(), Some("dive".into()));
+        assert_eq!(reloaded(&dir)[0].folder.as_deref(), Some("dive"));
+    }
+
+    #[test]
+    fn set_folder_moves_and_persists() {
+        let (dir, mut ui) = temp_ui();
+        ui.add("home".into(), view(), Some("dive".into()));
+        ui.set_folder(0, Some("other".into()));
+        assert_eq!(reloaded(&dir)[0].folder.as_deref(), Some("other"));
+        ui.set_folder(0, None);
+        assert_eq!(reloaded(&dir)[0].folder, None);
+        assert!(folders(&ui.items).is_empty());
+    }
+
+    #[test]
+    fn set_rotation_persists() {
+        let (dir, mut ui) = temp_ui();
+        ui.add("home".into(), view(), Some("dive".into()));
+        ui.set_rotation(0, -12.5);
+        assert_eq!(reloaded(&dir)[0].rotation, -12.5);
     }
 }
