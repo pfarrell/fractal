@@ -4,9 +4,7 @@ use crate::engine::bookmark::{Bookmark, BookmarkView};
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
-use crate::engine::movie::{
-    CameraPath, MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie,
-};
+use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, find_ffmpeg, render_movie};
 use crate::engine::render::CancelToken;
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use eframe::egui;
@@ -119,7 +117,6 @@ struct EstimateKey {
     fps: u32,
     seconds: f64,
     size: (usize, usize),
-    path: CameraPath,
     rotation: f64,
     quality: Quality,
 }
@@ -178,7 +175,6 @@ pub struct MovieDialog {
     end_magnification: f64,
     fps: u32,
     seconds: f64,
-    path: CameraPath,
     /// Degrees per second the picture turns.
     rotation: f64,
     /// How frames are rendered: every one exactly, or from keyframes.
@@ -221,7 +217,6 @@ impl Default for MovieDialog {
             end_magnification: 1e10,
             fps: 30,
             seconds: 20.0,
-            path: CameraPath::Straight,
             rotation: 0.0,
             quality: Quality::Smooth,
             estimate: None,
@@ -295,7 +290,6 @@ impl MovieDialog {
             max_iter: start.max_iter,
             color: start.color,
             output: PathBuf::from(&self.output),
-            path: self.path,
             rotation: self.rotation,
             quality: self.quality,
         }
@@ -315,7 +309,6 @@ impl MovieDialog {
             fps: spec.fps,
             seconds: spec.seconds,
             size: (spec.width, spec.height),
-            path: spec.path,
             rotation: spec.rotation,
             quality: spec.quality,
         };
@@ -545,20 +538,6 @@ impl MovieDialog {
                 ui.label("");
                 ui.small(self.pace_text());
                 ui.end_row();
-                ui.label("Path");
-                egui::ComboBox::from_id_salt("movie_path")
-                    .selected_text(self.path.label())
-                    .show_ui(ui, |ui| {
-                        for p in CameraPath::ALL {
-                            ui.selectable_value(&mut self.path, p, p.label());
-                        }
-                    });
-                ui.end_row();
-                if self.path == CameraPath::Circle {
-                    ui.label("");
-                    ui.small("the target circles the screen every 15 s");
-                    ui.end_row();
-                }
                 ui.label("Rotation");
                 ui.add(egui::Slider::new(&mut self.rotation, -30.0..=30.0).suffix(" °/s"));
                 ui.end_row();
@@ -763,14 +742,11 @@ mod tests {
     }
 
     #[test]
-    fn path_and_rotation_reach_the_spec() {
+    fn rotation_reaches_the_spec() {
         let mut d = MovieDialog::default();
-        let sp = d.spec(&current());
-        assert_eq!((sp.path, sp.rotation), (CameraPath::Straight, 0.0));
-        d.path = CameraPath::Circle;
+        assert_eq!(d.spec(&current()).rotation, 0.0);
         d.rotation = -6.0;
-        let sp = d.spec(&current());
-        assert_eq!((sp.path, sp.rotation), (CameraPath::Circle, -6.0));
+        assert_eq!(d.spec(&current()).rotation, -6.0);
     }
 
     #[test]

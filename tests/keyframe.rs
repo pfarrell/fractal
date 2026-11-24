@@ -5,7 +5,7 @@ use fractal_explorer::engine::keyframe::{
     keyframe_work, linear_to_srgb, pack, plan, planned_work, render_keyframe, resample,
     srgb_to_linear, tap_color,
 };
-use fractal_explorer::engine::movie::{CameraPath, MovieSpec, RotatedSampler};
+use fractal_explorer::engine::movie::{MovieSpec, RotatedSampler};
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, render};
 use fractal_explorer::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
@@ -27,7 +27,6 @@ fn base(quality: Quality) -> MovieSpec {
         max_iter: MaxIter::Auto,
         color: ColorSettings::default(),
         output: PathBuf::from("/tmp/unused.mp4"),
-        path: CameraPath::Straight,
         rotation: 0.0,
         quality,
     }
@@ -50,8 +49,7 @@ fn specs(quality: Quality) -> Vec<(&'static str, MovieSpec)> {
         end_span: 0.01,
         ..base(quality)
     };
-    let circle = MovieSpec {
-        path: CameraPath::Circle,
+    let turning = MovieSpec {
         rotation: 12.0,
         ..base(quality)
     };
@@ -65,7 +63,7 @@ fn specs(quality: Quality) -> Vec<(&'static str, MovieSpec)> {
         ("zoom in", zoom_in),
         ("zoom out", zoom_out),
         ("pan", pan),
-        ("circle", circle),
+        ("turning", turning),
         ("two frames", two_frames),
     ]
 }

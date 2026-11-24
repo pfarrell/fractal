@@ -3,9 +3,8 @@ use fractal_explorer::engine::color::colorize;
 use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, plan};
 use fractal_explorer::engine::movie::{
-    CIRCLE_PERIOD_S, CIRCLE_RADIUS, CameraPath, Kept, MovieError, MovieProgress, MovieSpec,
-    RotatedSampler, ffmpeg_args, ffmpeg_install_hint, find_program, render_exact_frame,
-    render_movie, rotated_point,
+    Kept, MovieError, MovieProgress, MovieSpec, RotatedSampler, ffmpeg_args, ffmpeg_install_hint,
+    find_program, render_exact_frame, render_movie, rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
 use fractal_explorer::engine::viewport::{MaxIter, Viewport};
@@ -29,7 +28,6 @@ fn spec(out: PathBuf) -> MovieSpec {
         max_iter: MaxIter::Auto,
         color: ColorSettings::default(),
         output: out,
-        path: CameraPath::Straight,
         rotation: 0.0,
         quality: Quality::Exact,
     }
@@ -79,65 +77,6 @@ fn last_frame_is_centered_on_target() {
     let sp = s();
     let last = sp.frame_view(sp.frame_count() - 1);
     assert!(pixels_apart(&last, last.center, sp.target) < 0.01);
-}
-
-/// A 60 s movie with the circle path, and its straight twin.
-fn circling(seconds: f64) -> (MovieSpec, MovieSpec) {
-    let mut c = s();
-    c.seconds = seconds;
-    c.path = CameraPath::Circle;
-    let mut st = s();
-    st.seconds = seconds;
-    (c, st)
-}
-
-/// How far frame `i` of the circle drifts from the straight zoom, in spans.
-fn drift(c: &MovieSpec, st: &MovieSpec, i: usize) -> Complex64 {
-    let v = c.frame_view(i);
-    (v.center - st.frame_view(i).center) / v.span
-}
-
-#[test]
-fn circle_keeps_first_and_last_frames() {
-    for secs in [1.0, 60.0] {
-        let (c, st) = circling(secs);
-        let n = c.frame_count();
-        assert_eq!(c.frame_view(0).center, st.frame_view(0).center, "{secs}");
-        assert_eq!(
-            c.frame_view(n - 1).center,
-            st.frame_view(n - 1).center,
-            "{secs}"
-        );
-    }
-}
-
-#[test]
-fn circle_drift_stays_within_radius() {
-    let (c, st) = circling(60.0);
-    let max = (0..c.frame_count())
-        .map(|i| drift(&c, &st, i).norm())
-        .fold(0.0, f64::max);
-    assert!(max <= CIRCLE_RADIUS * (1.0 + 1e-9), "{max}");
-    assert!(max > 0.1, "barely drifts: {max}");
-}
-
-#[test]
-fn circle_period_is_fifteen_seconds() {
-    assert_eq!(CIRCLE_PERIOD_S, 15.0);
-    let (c, st) = circling(60.0);
-    let time = |i: usize| i as f64 / (c.frame_count() - 1) as f64 * c.seconds;
-    // Mid-movie (fully eased in), the drift turns 2π every 15 s.
-    let base = 600; // 20 s in
-    for j in [700, 900, 1050, 1200] {
-        let turned = (drift(&c, &st, j) / drift(&c, &st, base)).arg();
-        let want = std::f64::consts::TAU * (time(j) - time(base)) / CIRCLE_PERIOD_S;
-        let want =
-            (want + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
-        assert!(
-            (turned - want).abs() < 1e-6,
-            "frame {j}: {turned} vs {want}"
-        );
-    }
 }
 
 #[test]
@@ -689,11 +628,10 @@ fn missing_ffmpeg_message_says_how_to_fix_it() {
     assert!(ffmpeg_install_hint().contains("install ffmpeg"));
 }
 
-/// 64×48, 2 s at 30 fps, circling and turning.
+/// 64×48, 2 s at 30 fps, turning.
 fn keyframe_spec(out: PathBuf, quality: Quality) -> MovieSpec {
     let mut sp = spec(out);
     sp.seconds = 2.0;
-    sp.path = CameraPath::Circle;
     sp.rotation = 10.0;
     sp.quality = quality;
     sp

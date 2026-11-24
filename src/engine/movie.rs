@@ -15,10 +15,7 @@
 //! outward from it. With no zoom (r = 1) there is no fixed point, so the
 //! center pans in a straight line instead.
 //!
-//! That is the `Straight` camera path. `Circle` adds a drift of up to
-//! [`CIRCLE_RADIUS`] spans around that center, so Q circles the screen
-//! instead of staying put, and `rotation` turns each frame about the
-//! screen center. The drift is zero on the first and last frames.
+//! `rotation` turns each frame about the screen center.
 
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate};
@@ -35,32 +32,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-
-/// How the camera moves on its way to the target.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CameraPath {
-    /// Straight in, the target fixed at the screen center.
-    #[default]
-    Straight,
-    /// The target circles the screen center, eased out by the end.
-    Circle,
-}
-
-impl CameraPath {
-    pub const ALL: [CameraPath; 2] = [CameraPath::Straight, CameraPath::Circle];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            CameraPath::Straight => "Straight",
-            CameraPath::Circle => "Circle",
-        }
-    }
-}
-
-/// Seconds of movie per loop of the circle path.
-pub const CIRCLE_PERIOD_S: f64 = 15.0;
-/// The circle's radius, as a fraction of the current view's span.
-pub const CIRCLE_RADIUS: f64 = 0.15;
 
 /// The point at pixel position (`x`, `y`) of `view` turned by `angle`
 /// radians (counterclockwise) about the view's center.
@@ -90,11 +61,6 @@ impl Sampler for RotatedSampler {
     }
 }
 
-fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MovieSpec {
     pub kind: FractalKind,
@@ -109,8 +75,6 @@ pub struct MovieSpec {
     pub max_iter: MaxIter,
     pub color: ColorSettings,
     pub output: PathBuf,
-    #[serde(default)]
-    pub path: CameraPath,
     /// Degrees per second the picture turns (negative: the other way).
     #[serde(default)]
     pub rotation: f64,
@@ -330,7 +294,6 @@ impl MovieSpec {
             let fixed = (c1 - c0 * r) / (1.0 - r);
             fixed + (c0 - fixed) * (span / self.start_span)
         };
-        let center = center + self.drift(t * self.seconds) * span;
         Viewport::new(center, span, self.width, self.height)
     }
 
@@ -347,23 +310,6 @@ impl MovieSpec {
         let angle = self.frame_angle(i);
         let (w, h) = (view.width as f64, view.height as f64);
         [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| rotated_point(&view, angle, x, y))
-    }
-
-    /// The camera path's offset from the straight zoom at `time` seconds,
-    /// in units of the view's span. Zero at the first and last frames.
-    fn drift(&self, time: f64) -> Complex64 {
-        match self.path {
-            CameraPath::Straight => Complex64::new(0.0, 0.0),
-            CameraPath::Circle => {
-                let total = self.seconds;
-                let ease_in = 2.0_f64.min(total / 4.0);
-                let ease_out = 4.0_f64.min(total / 4.0);
-                let fade = smoothstep(0.0, ease_in, time)
-                    * (1.0 - smoothstep(total - ease_out, total, time));
-                let phase = std::f64::consts::TAU * time / CIRCLE_PERIOD_S;
-                Complex64::from_polar(CIRCLE_RADIUS * fade, phase)
-            }
-        }
     }
 }
 
