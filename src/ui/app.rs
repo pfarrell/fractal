@@ -146,6 +146,8 @@ pub struct FractalApp {
     pixels: Vec<[u8; 4]>,
     needs_render: bool,
     cursor: Option<Complex64>,
+    /// Where the picture was last right-clicked (the context menu's point).
+    menu_point: Option<Complex64>,
     julia: JuliaPanel,
     orbit: Option<OrbitState>,
     ifs: IfsState,
@@ -165,6 +167,7 @@ impl FractalApp {
             pixels: Vec::new(),
             needs_render: true,
             cursor: None,
+            menu_point: None,
             julia: JuliaPanel::new(&cc.egui_ctx, max_threads),
             orbit: None,
             ifs: IfsState::new(&cc.egui_ctx, max_threads),
@@ -366,6 +369,12 @@ impl FractalApp {
                 if let Some(o) = &self.orbit {
                     draw_orbit(ui, &resp.mapping, &self.explore.view, &o.path);
                 }
+                if let Some(p) = resp.secondary_clicked {
+                    self.menu_point = Some(p);
+                }
+                if let Some(p) = self.menu_point {
+                    resp.response.context_menu(|ui| self.canvas_menu(ui, p));
+                }
             });
 
         if self.needs_render && self.mode == Mode::Escape && !self.movie.is_open() {
@@ -435,6 +444,21 @@ impl FractalApp {
 }
 
 impl FractalApp {
+    /// Right-click menu on the picture, for the point `p` that was clicked.
+    fn canvas_menu(&mut self, ui: &mut egui::Ui, p: Complex64) {
+        if ui.button("Center here").clicked() {
+            self.explore.view.center = p;
+            self.needs_render = true;
+            ui.close();
+        }
+        ui.separator();
+        ui.label("Bookmark here (same zoom)");
+        let view = self.current_bookmark_view().with_center(p);
+        if self.bookmarks.save_form(ui, move || view) {
+            ui.close();
+        }
+    }
+
     /// The picture on screen, as a bookmark.
     fn current_bookmark_view(&self) -> BookmarkView {
         let e = &self.explore;

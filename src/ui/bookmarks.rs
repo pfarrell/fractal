@@ -134,7 +134,7 @@ impl BookmarksUi {
                     return;
                 }
                 let names = folders(&self.items);
-                self.save_row(ui, &names, current);
+                self.save_row(ui, &names, "bookmark_save_folder", "Save current", current);
                 ui.separator();
                 let mut action = None;
                 for i in folder_order(&self.items, None) {
@@ -166,13 +166,24 @@ impl BookmarksUi {
         go
     }
 
-    /// Name, folder and "Save current".
+    /// Name and folder fields plus a save button, for saving `view` from
+    /// somewhere other than this window (the picture's right-click menu).
+    /// Returns true once saved.
+    pub fn save_form(&mut self, ui: &mut egui::Ui, view: impl FnOnce() -> BookmarkView) -> bool {
+        let names = folders(&self.items);
+        self.save_row(ui, &names, "bookmark_here_folder", "Save here", view)
+    }
+
+    /// Name, folder and "Save current". Returns true once saved.
     fn save_row(
         &mut self,
         ui: &mut egui::Ui,
         names: &[String],
+        combo_id: &str,
+        button: &str,
         current: impl FnOnce() -> BookmarkView,
-    ) {
+    ) -> bool {
+        let mut saved = false;
         if let FolderChoice::Existing(f) = &self.save_folder
             && !names.contains(f)
         {
@@ -185,7 +196,7 @@ impl BookmarksUi {
                 FolderChoice::Existing(f) => f.clone(),
                 FolderChoice::New => "New folder…".to_string(),
             };
-            egui::ComboBox::from_id_salt("bookmark_save_folder")
+            egui::ComboBox::from_id_salt(combo_id)
                 .selected_text(label)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.save_folder, FolderChoice::Unfiled, "Unfiled");
@@ -211,9 +222,7 @@ impl BookmarksUi {
             };
             let name = self.name.trim().to_string();
             let ready = !name.is_empty() && folder.is_some();
-            if ui
-                .add_enabled(ready, egui::Button::new("Save current"))
-                .clicked()
+            if ui.add_enabled(ready, egui::Button::new(button)).clicked()
                 && let Some(folder) = folder
             {
                 if self.save_folder == FolderChoice::New {
@@ -222,8 +231,10 @@ impl BookmarksUi {
                 }
                 self.add(name, current(), folder);
                 self.name.clear();
+                saved = true;
             }
         });
+        saved
     }
 
     /// One bookmark: Go, delete, move, and its label.

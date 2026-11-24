@@ -11,6 +11,10 @@ pub struct ViewResponse {
     pub hovered: Option<Complex64>,
     /// Complex point clicked (without dragging).
     pub clicked: Option<Complex64>,
+    /// Complex point right-clicked (where a context menu opens).
+    pub secondary_clicked: Option<Complex64>,
+    /// The view's own response, for attaching a context menu.
+    pub response: egui::Response,
     /// The view was zoomed or panned.
     pub view_changed: bool,
     /// Where the view sits on screen, for overlays.
@@ -116,9 +120,16 @@ pub fn show_view(
     } else {
         None
     };
+    let secondary_clicked = if response.secondary_clicked() {
+        response.interact_pointer_pos().map(to_complex)
+    } else {
+        None
+    };
     ViewResponse {
         hovered,
         clicked,
+        secondary_clicked,
+        response,
         view_changed,
         mapping,
     }

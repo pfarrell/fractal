@@ -35,6 +35,14 @@ impl BookmarkView {
             BookmarkView::Escape { span, .. } | BookmarkView::Ifs { span, .. } => *span,
         }
     }
+
+    /// The same view (zoom, settings) centered on `c`.
+    pub fn with_center(mut self, c: Complex64) -> Self {
+        match &mut self {
+            BookmarkView::Escape { center, .. } | BookmarkView::Ifs { center, .. } => *center = c,
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -222,6 +230,40 @@ mod tests {
     use crate::engine::ifs::IfsSystem;
     use crate::engine::viewport::MaxIter;
     use num_complex::Complex64;
+
+    #[test]
+    fn with_center_moves_only_the_center() {
+        for b in samples() {
+            let c = Complex64::new(0.25, -0.125);
+            let moved = b.view.clone().with_center(c);
+            assert_eq!(moved.span(), b.view.span());
+            match (&moved, &b.view) {
+                (
+                    BookmarkView::Escape {
+                        center,
+                        kind,
+                        max_iter,
+                        color,
+                        ..
+                    },
+                    BookmarkView::Escape {
+                        kind: k,
+                        max_iter: m,
+                        color: col,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(*center, c);
+                    assert_eq!((kind, max_iter, color), (k, m, col));
+                }
+                (BookmarkView::Ifs { center, points, .. }, BookmarkView::Ifs { points: p, .. }) => {
+                    assert_eq!(*center, c);
+                    assert_eq!(points, p);
+                }
+                _ => panic!("kind changed"),
+            }
+        }
+    }
 
     fn samples() -> Vec<Bookmark> {
         vec![

@@ -66,9 +66,8 @@ pub fn explore_panel(
             });
         }
         FractalKind::Multibrot { power } => {
-            ch.render |= ui
-                .add(egui::Slider::new(power, 2..=8).text("power d"))
-                .changed();
+            ch.render |=
+                crate::ui::slider(ui, egui::Slider::new(power, 2..=8).text("power d")).changed();
         }
         FractalKind::Newton { poly } => {
             egui::ComboBox::from_id_salt("poly")
@@ -101,13 +100,13 @@ pub fn explore_panel(
     }
     match &mut state.max_iter {
         MaxIter::Fixed(n) => {
-            ch.render |= ui
-                .add(
-                    egui::Slider::new(n, 50..=20_000)
-                        .logarithmic(true)
-                        .text("max"),
-                )
-                .changed();
+            ch.render |= crate::ui::slider(
+                ui,
+                egui::Slider::new(n, 50..=20_000)
+                    .logarithmic(true)
+                    .text("max"),
+            )
+            .changed();
         }
         MaxIter::Auto => {
             ui.label(format!("max = {effective}"));
@@ -117,16 +116,18 @@ pub fn explore_panel(
     ui.separator();
     ui.heading("Color");
     ch.color |= palette_combo(ui, &mut state.color.palette);
-    ch.color |= ui
-        .add(egui::Slider::new(&mut state.color.offset, 0.0..=1.0).text("offset"))
-        .changed();
-    ch.color |= ui
-        .add(
-            egui::Slider::new(&mut state.color.scale, 1.0 / 256.0..=0.25)
-                .logarithmic(true)
-                .text("scale"),
-        )
-        .changed();
+    ch.color |= crate::ui::slider(
+        ui,
+        egui::Slider::new(&mut state.color.offset, 0.0..=1.0).text("offset"),
+    )
+    .changed();
+    ch.color |= crate::ui::slider(
+        ui,
+        egui::Slider::new(&mut state.color.scale, 1.0 / 256.0..=0.25)
+            .logarithmic(true)
+            .text("scale"),
+    )
+    .changed();
     let defaults = ColorSettings::default();
     let at_defaults = state.color.offset == defaults.offset && state.color.scale == defaults.scale;
     if ui
@@ -207,7 +208,10 @@ pub fn palette_combo(ui: &mut egui::Ui, palette: &mut PaletteId) -> bool {
 /// Thread-count slider. Returns the new count if changed.
 pub fn threads_slider(ui: &mut egui::Ui, threads: usize, max_threads: usize) -> Option<usize> {
     let mut n = threads;
-    ui.add(egui::Slider::new(&mut n, 1..=max_threads).text("threads"))
-        .changed()
-        .then_some(n)
+    crate::ui::slider(
+        ui,
+        egui::Slider::new(&mut n, 1..=max_threads).text("threads"),
+    )
+    .changed()
+    .then_some(n)
 }

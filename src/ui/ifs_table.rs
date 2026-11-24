@@ -169,13 +169,13 @@ impl IfsState {
             self.needs_render |= ifs_table(ui, &mut self.system);
         });
         let mut pts = self.points as f64;
-        if ui
-            .add(
-                egui::Slider::new(&mut pts, 1e5..=5e7)
-                    .logarithmic(true)
-                    .text("points"),
-            )
-            .changed()
+        if crate::ui::slider(
+            ui,
+            egui::Slider::new(&mut pts, 1e5..=5e7)
+                .logarithmic(true)
+                .text("points"),
+        )
+        .changed()
         {
             self.points = pts as u64;
             self.needs_render = true;

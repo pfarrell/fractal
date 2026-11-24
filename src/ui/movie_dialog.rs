@@ -555,10 +555,12 @@ impl MovieDialog {
                     });
                 ui.end_row();
                 ui.label("Duration");
-                ui.add(
+                crate::ui::slider(
+                    ui,
                     egui::Slider::new(&mut self.seconds, 1.0..=MAX_SLIDER_SECONDS)
                         .logarithmic(true)
                         .clamping(egui::SliderClamping::Never)
+                        .step_by(1.0)
                         .suffix(" s"),
                 );
                 ui.end_row();
@@ -567,7 +569,12 @@ impl MovieDialog {
                 ui.end_row();
                 if self.route == RouteMode::StartEnd {
                     ui.label("Rotation");
-                    ui.add(egui::Slider::new(&mut self.rotation, -30.0..=30.0).suffix(" °/s"));
+                    crate::ui::slider(
+                        ui,
+                        egui::Slider::new(&mut self.rotation, -30.0..=30.0)
+                            .step_by(1.0)
+                            .suffix(" °/s"),
+                    );
                     ui.end_row();
                 }
                 ui.label("Quality");
@@ -667,7 +674,10 @@ impl MovieDialog {
         }
         ui.label("End zoom");
         let floor_mag = DEFAULT_SPAN / (min_pixel_scale(self.target) * self.height as f64);
-        ui.add(egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag).logarithmic(true));
+        crate::ui::slider(
+            ui,
+            egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag).logarithmic(true),
+        );
         ui.end_row();
         ui.label("");
         ui.small(format!("precision limit here ≈ {floor_mag:.1e}"));
@@ -710,7 +720,12 @@ impl MovieDialog {
             if let Some(p) = prev {
                 ui.label("  turn");
                 let mut rate = bookmarks.items[*idx].rotation;
-                let resp = ui.add(egui::Slider::new(&mut rate, -30.0..=30.0).suffix(" °/s"));
+                let resp = crate::ui::slider(
+                    ui,
+                    egui::Slider::new(&mut rate, -30.0..=30.0)
+                        .step_by(1.0)
+                        .suffix(" °/s"),
+                );
                 if resp.changed() {
                     // Shown at once; written to disk when the edit ends.
                     bookmarks.items[*idx].rotation = rate;
