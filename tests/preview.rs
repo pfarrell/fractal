@@ -9,7 +9,7 @@ use fractal_explorer::engine::preview::{
     runs_to_render, spawn_preview, window_at,
 };
 use fractal_explorer::engine::render::CancelToken;
-use fractal_explorer::engine::route::{JOINT_HALF_WIDTH_S, Stop};
+use fractal_explorer::engine::route::{JOINT_HALF_WIDTH_S, RotationUnit, Stop};
 use fractal_explorer::engine::viewport::MaxIter;
 use num_complex::Complex64;
 use std::path::PathBuf;
@@ -22,6 +22,7 @@ fn st(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
         center: Complex64::new(re, im),
         span,
         rotation,
+        rotation_unit: RotationUnit::PerSecond,
     }
 }
 

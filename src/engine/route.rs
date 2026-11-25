@@ -12,20 +12,57 @@
 //! smoothly instead of kinking. The camera passes close to the stop rather
 //! than exactly through it. The first and last stops are hit exactly.
 //!
-//! Rotation: step k turns at the arriving stop's `rotation` (°/s); the
-//! rate blends across the same windows, and the angle is its integral.
+//! Rotation: each step turns by a planned amount: the arriving stop's
+//! `rotation`, either as total degrees or as °/s times the step's time.
+//! The angle follows a monotone cubic (PCHIP, Fritsch–Carlson) through the
+//! cumulative angle at each stop's time, so it is exact at every stop and
+//! never overshoots. The turning speed is continuous and comes to rest only
+//! at the first and last stops, where the turn reverses, and next to a step
+//! that doesn't turn.
 
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
+
+/// How a step's `rotation` is measured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RotationUnit {
+    /// Degrees per second, averaged over the step.
+    #[default]
+    PerSecond,
+    /// Degrees turned over the whole step.
+    Total,
+}
+
+impl RotationUnit {
+    pub const ALL: [RotationUnit; 2] = [RotationUnit::PerSecond, RotationUnit::Total];
+
+    /// Unit label, as a slider suffix.
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            RotationUnit::PerSecond => " °/s",
+            RotationUnit::Total => " °",
+        }
+    }
+
+    /// Slider range for a turn in this unit.
+    pub fn range(&self) -> std::ops::RangeInclusive<f64> {
+        match self {
+            RotationUnit::PerSecond => -30.0..=30.0,
+            RotationUnit::Total => -720.0..=720.0,
+        }
+    }
+}
 
 /// One point the camera passes through.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stop {
     pub center: Complex64,
     pub span: f64,
-    /// °/s the picture turns on the step arriving here; ignored on the
-    /// first stop.
+    /// How far the picture turns on the step arriving here, in
+    /// `rotation_unit`; ignored on the first stop.
     pub rotation: f64,
+    #[serde(default)]
+    pub rotation_unit: RotationUnit,
 }
 
 /// Default half-width of the blend window around an interior stop, in
@@ -54,25 +91,50 @@ fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// ∫ from −∞ to `t` of a unit step at `at`, smoothed by a smoothstep over
-/// `[at − h, at + h]` (a plain step when `h` is 0).
-fn smoothed_step_integral(at: f64, h: f64, t: f64) -> f64 {
-    if t <= at - h {
-        0.0
-    } else if t >= at + h {
-        t - at
-    } else {
-        let x = (t - (at - h)) / (2.0 * h);
-        2.0 * h * (x * x * x - x * x * x * x / 2.0)
-    }
-}
-
 pub struct Route {
     stops: Vec<Stop>,
     /// Movie time of each stop: 0 … seconds.
     times: Vec<f64>,
     /// Blend half-width at each stop (0 at the first and last).
     half: Vec<f64>,
+    /// Planned angle at each stop's time, radians (0 at the first).
+    knot_angle: Vec<f64>,
+    /// Turning speed at each stop's time, radians per second.
+    knot_rate: Vec<f64>,
+}
+
+/// Each step's planned turn in radians, from the arriving stop.
+fn step_turns(stops: &[Stop], times: &[f64]) -> Vec<f64> {
+    (0..stops.len() - 1)
+        .map(|k| {
+            let r = stops[k + 1].rotation.to_radians();
+            match stops[k + 1].rotation_unit {
+                RotationUnit::Total => r,
+                RotationUnit::PerSecond => r * (times[k + 1] - times[k]),
+            }
+        })
+        .collect()
+}
+
+/// PCHIP knot speeds for steps of duration `h` turning `turns`: 0 at the
+/// ends and where the turn changes sign or stops, else the weighted
+/// harmonic mean of the neighbouring steps' average speeds.
+fn knot_rates(h: &[f64], turns: &[f64]) -> Vec<f64> {
+    let d: Vec<f64> = h
+        .iter()
+        .zip(turns)
+        .map(|(&h, &a)| if h > 0.0 { a / h } else { 0.0 })
+        .collect();
+    let mut m = vec![0.0; h.len() + 1];
+    for k in 1..h.len() {
+        let (d0, d1) = (d[k - 1], d[k]);
+        if d0 * d1 > 0.0 {
+            let w1 = 2.0 * h[k] + h[k - 1];
+            let w2 = h[k] + 2.0 * h[k - 1];
+            m[k] = (w1 + w2) / (w1 / d0 + w2 / d1);
+        }
+    }
+    m
 }
 
 impl Route {
@@ -100,10 +162,20 @@ impl Route {
             let after = times[k + 1] - times[k];
             half[k] = max_half_width.min(before / 3.0).min(after / 3.0).max(0.0);
         }
+        let turns = step_turns(stops, &times);
+        let mut knot_angle = Vec::with_capacity(n);
+        knot_angle.push(0.0);
+        for a in &turns {
+            knot_angle.push(knot_angle.last().unwrap() + a);
+        }
+        let h: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+        let knot_rate = knot_rates(&h, &turns);
         Route {
             stops: stops.to_vec(),
             times,
             half,
+            knot_angle,
+            knot_rate,
         }
     }
 
@@ -174,12 +246,24 @@ impl Route {
 
     /// Radians turned by time `t` (counterclockwise positive).
     pub fn angle_at(&self, t: f64) -> f64 {
-        let rate = |k: usize| self.stops[k + 1].rotation.to_radians();
-        let mut angle = rate(0) * t;
-        for j in 1..self.steps() {
-            angle +=
-                (rate(j) - rate(j - 1)) * smoothed_step_integral(self.times[j], self.half[j], t);
+        let last = self.times.len() - 1;
+        let t = t.clamp(0.0, self.times[last]);
+        let k = self.step_at(t);
+        let (a0, a1) = (self.knot_angle[k], self.knot_angle[k + 1]);
+        let (m0, m1) = (self.knot_rate[k], self.knot_rate[k + 1]);
+        if a0 == 0.0 && a1 == 0.0 && m0 == 0.0 && m1 == 0.0 {
+            return 0.0;
         }
-        angle
+        let h = self.times[k + 1] - self.times[k];
+        if h <= 0.0 {
+            return a1;
+        }
+        let s = (t - self.times[k]) / h;
+        let (s2, s3) = (s * s, s * s * s);
+        let h00 = 2.0 * s3 - 3.0 * s2 + 1.0;
+        let h10 = s3 - 2.0 * s2 + s;
+        let h01 = -2.0 * s3 + 3.0 * s2;
+        let h11 = s3 - s2;
+        h00 * a0 + h10 * h * m0 + h01 * a1 + h11 * h * m1
     }
 }

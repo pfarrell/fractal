@@ -9,7 +9,7 @@ use crate::engine::movie::{
 };
 use crate::engine::preview::{frame_at_time, preview_spec};
 use crate::engine::render::CancelToken;
-use crate::engine::route::{Stop, outside_previous};
+use crate::engine::route::{RotationUnit, Stop, outside_previous};
 use crate::engine::soundtrack::{CROSSFADE_S, find_ffprobe, probe_track};
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use crate::ui::bookmarks::BookmarksUi;
@@ -445,11 +445,13 @@ impl MovieDialog {
                     center: start.view.center,
                     span: start.view.span,
                     rotation: 0.0,
+                    rotation_unit: RotationUnit::PerSecond,
                 },
                 Stop {
                     center: self.target,
                     span: DEFAULT_SPAN / self.end_magnification,
                     rotation: self.rotation,
+                    rotation_unit: RotationUnit::PerSecond,
                 },
             ],
             fps: self.fps,

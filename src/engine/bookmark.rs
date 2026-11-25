@@ -3,7 +3,7 @@
 use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::ifs::IfsSystem;
-use crate::engine::route::{Stop, step_length};
+use crate::engine::route::{RotationUnit, Stop, step_length};
 use crate::engine::viewport::MaxIter;
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,7 @@ pub fn folder_path(items: &[Bookmark], folder: &str) -> Option<FolderPath> {
             center,
             span,
             rotation: items[i].rotation,
+            rotation_unit: RotationUnit::PerSecond,
         };
         match &mut path {
             None => {
