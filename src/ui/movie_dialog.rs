@@ -919,7 +919,8 @@ impl MovieDialog {
                     bookmarks.items[*idx].rotation = rate;
                 }
                 if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-                    bookmarks.set_rotation(*idx, rate);
+                    let unit = bookmarks.items[*idx].rotation_unit;
+                    bookmarks.set_rotation(*idx, rate, unit);
                 }
                 ui.end_row();
                 if outside_previous(&p, stop, self.width, self.height) {
@@ -1242,6 +1243,7 @@ mod tests {
             view,
             folder: Some(folder.into()),
             rotation,
+            rotation_unit: RotationUnit::PerSecond,
         }
     }
 

@@ -52,10 +52,13 @@ pub struct Bookmark {
     /// The folder this bookmark is filed in; `None` = unfiled.
     #[serde(default)]
     pub folder: Option<String>,
-    /// °/s the picture turns on the step arriving here when its folder
-    /// plays as a path. Unused on the folder's shallowest bookmark.
+    /// How far the picture turns on the step arriving here when its
+    /// folder plays as a path, in `rotation_unit`. Unused on the folder's
+    /// shallowest bookmark.
     #[serde(default)]
     pub rotation: f64,
+    #[serde(default)]
+    pub rotation_unit: RotationUnit,
 }
 
 /// Distinct folder names, alphabetical.
@@ -118,7 +121,7 @@ pub fn folder_path(items: &[Bookmark], folder: &str) -> Option<FolderPath> {
             center,
             span,
             rotation: items[i].rotation,
-            rotation_unit: RotationUnit::PerSecond,
+            rotation_unit: items[i].rotation_unit,
         };
         match &mut path {
             None => {
@@ -271,6 +274,7 @@ mod tests {
             Bookmark {
                 folder: Some("dive".into()),
                 rotation: 7.5,
+                rotation_unit: RotationUnit::PerSecond,
                 name: "seahorse".into(),
                 view: BookmarkView::Escape {
                     kind: FractalKind::Mandelbrot,
@@ -283,6 +287,7 @@ mod tests {
             Bookmark {
                 folder: None,
                 rotation: 0.0,
+                rotation_unit: RotationUnit::PerSecond,
                 name: "fern".into(),
                 view: BookmarkView::Ifs {
                     system: IfsSystem::barnsley_fern(),
@@ -369,6 +374,7 @@ mod tests {
             },
             folder: folder.map(String::from),
             rotation: span.log10(),
+            rotation_unit: RotationUnit::PerSecond,
         }
     }
 
@@ -387,11 +393,9 @@ mod tests {
         std::fs::write(&path, serde_json::to_string(&old).unwrap()).unwrap();
         let items = BookmarkStore::new(path).load().unwrap();
         assert_eq!(items.len(), 2);
-        assert!(
-            items
-                .iter()
-                .all(|b| b.folder.is_none() && b.rotation == 0.0)
-        );
+        assert!(items.iter().all(|b| b.folder.is_none()
+            && b.rotation == 0.0
+            && b.rotation_unit == RotationUnit::PerSecond));
     }
 
     #[test]
@@ -444,6 +448,18 @@ mod tests {
         assert_eq!(p.stops[2].1.rotation, items[4].rotation);
         assert_eq!(p.stops[0].1.span, 3.0);
         assert!(folder_path(&items, "nothing").is_none());
+    }
+
+    #[test]
+    fn folder_path_copies_rotation_unit() {
+        let mut items = vec![
+            m("top", Some("dive"), -0.5, 3.0),
+            m("deep", Some("dive"), -0.743, 1e-5),
+        ];
+        items[1].rotation_unit = RotationUnit::Total;
+        let p = folder_path(&items, "dive").unwrap();
+        assert_eq!(p.stops[1].1.rotation_unit, RotationUnit::Total);
+        assert_eq!(p.stops[0].1.rotation_unit, RotationUnit::PerSecond);
     }
 
     #[test]
