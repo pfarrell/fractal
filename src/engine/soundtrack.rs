@@ -34,6 +34,30 @@ fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
 }
 
+/// The overlap at each join: [`CROSSFADE_S`], but no more than half the
+/// shortest track.
+fn crossfade_for(track_secs: &[f64]) -> f64 {
+    let shortest = track_secs.iter().copied().fold(f64::INFINITY, f64::min);
+    CROSSFADE_S.min(shortest / 2.0)
+}
+
+/// How long the tracks last played once through in order, overlapped by
+/// the crossfade: a movie this long ends as the last track does. `None`
+/// with no tracks or a track without a usable length.
+pub fn playlist_length(track_secs: &[f64]) -> Option<f64> {
+    if track_secs.is_empty() || !track_secs.iter().all(|&t| positive(t)) {
+        return None;
+    }
+    let crossfade = crossfade_for(track_secs);
+    // The same running sum, in the same order, as `plan_soundtrack`, so a
+    // movie of this length plans each track exactly once.
+    let mut covered = 0.0;
+    for (plays, &t) in track_secs.iter().enumerate() {
+        covered += t - if plays == 0 { 0.0 } else { crossfade };
+    }
+    Some(covered)
+}
+
 /// Repeat the tracks in order until, overlapped by the crossfade, they
 /// cover `movie_secs`.
 pub fn plan_soundtrack(track_secs: &[f64], movie_secs: f64) -> Result<SoundtrackPlan, String> {
@@ -46,8 +70,7 @@ pub fn plan_soundtrack(track_secs: &[f64], movie_secs: f64) -> Result<Soundtrack
     if let Some(i) = track_secs.iter().position(|&t| !positive(t)) {
         return Err(format!("track {} has no usable length", i + 1));
     }
-    let shortest = track_secs.iter().copied().fold(f64::INFINITY, f64::min);
-    let crossfade = CROSSFADE_S.min(shortest / 2.0);
+    let crossfade = crossfade_for(track_secs);
     let n = track_secs.len();
     let mut sequence = Vec::new();
     let mut covered = 0.0;

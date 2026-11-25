@@ -3,7 +3,8 @@ mod common;
 use common::*;
 use fractal_explorer::engine::render::CancelToken;
 use fractal_explorer::engine::soundtrack::{
-    add_music, filter_graph, find_ffprobe, mux_args, plan_soundtrack, probe_duration, probe_track,
+    add_music, filter_graph, find_ffprobe, mux_args, plan_soundtrack, playlist_length,
+    probe_duration, probe_track,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -354,4 +355,22 @@ fn track_length_is_measured_not_estimated() {
 fn track_probe_names_a_missing_file() {
     let e = probe_track(Path::new("ffprobe"), Path::new("/nope/gone.mp3")).unwrap_err();
     assert!(e.starts_with("gone.mp3"), "{e}");
+}
+
+#[test]
+fn playlist_length_subtracts_crossfades() {
+    assert_eq!(playlist_length(&[60.0]), Some(60.0));
+    assert_eq!(playlist_length(&[60.0, 30.0]), Some(86.0));
+    // A 5 s track shrinks every crossfade to 2.5 s.
+    assert_eq!(playlist_length(&[60.0, 5.0, 30.0]), Some(90.0));
+    assert_eq!(playlist_length(&[]), None);
+    assert_eq!(playlist_length(&[60.0, 0.0]), None);
+}
+
+#[test]
+fn planned_at_playlist_length_plays_each_track_once() {
+    for ts in [vec![60.0], vec![60.0, 30.0], vec![61.37, 5.0, 30.1, 17.9]] {
+        let plan = plan_soundtrack(&ts, playlist_length(&ts).unwrap()).unwrap();
+        assert_eq!(plan.sequence, (0..ts.len()).collect::<Vec<_>>(), "{ts:?}");
+    }
 }
