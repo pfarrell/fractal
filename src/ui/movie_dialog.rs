@@ -10,7 +10,7 @@ use crate::engine::movie::{
 use crate::engine::preview::{frame_at_time, preview_spec};
 use crate::engine::render::CancelToken;
 use crate::engine::route::{RotationUnit, Stop, outside_previous};
-use crate::engine::soundtrack::{CROSSFADE_S, find_ffprobe, probe_track};
+use crate::engine::soundtrack::{CROSSFADE_S, find_ffprobe, playlist_length, probe_track};
 use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
 use crate::ui::bookmarks::BookmarksUi;
 use crate::ui::preview::{PlayerAction, Preview};
@@ -224,6 +224,8 @@ pub struct MovieDialog {
     ffprobe: Option<PathBuf>,
     /// Music to add, in play order.
     music: Vec<Track>,
+    /// Keep the duration equal to the music played once through.
+    match_music: bool,
 }
 
 /// A turn's slider and its °/s | ° switch. Switching keeps the number.
@@ -287,6 +289,7 @@ impl Default for MovieDialog {
             preview: None,
             ffprobe: None,
             music: Vec::new(),
+            match_music: false,
         }
     }
 }
@@ -406,10 +409,40 @@ impl MovieDialog {
         }
     }
 
+    /// The music played once through, when every track has a length.
+    fn music_length(&self) -> Option<f64> {
+        let secs: Option<Vec<f64>> = self.music.iter().map(|t| t.probed.clone().ok()).collect();
+        playlist_length(&secs?)
+    }
+
+    /// The music sets the duration, so its slider is locked.
+    fn duration_locked(&self) -> bool {
+        self.match_music && self.music_length().is_some()
+    }
+
+    /// While "match music" is on, set the duration to the music's length,
+    /// rounded down to a whole frame so the video never outlasts the music.
+    /// Left alone when there is no music or a track couldn't be measured.
+    fn sync_music_length(&mut self) {
+        if !self.match_music {
+            return;
+        }
+        if let Some(len) = self.music_length() {
+            let fps = self.fps as f64;
+            self.seconds = (len * fps).floor().max(2.0) / fps;
+        }
+    }
+
     /// How the music will play, when there is any.
     fn music_summary(&self) -> Option<String> {
         if self.music.is_empty() {
             return None;
+        }
+        if self.duration_locked() {
+            return Some(format!(
+                "Plays once through with {CROSSFADE_S} s crossfades: {}.",
+                format_duration(self.seconds)
+            ));
         }
         Some(format!(
             "Plays in order with {CROSSFADE_S} s crossfades, looping to fill {}.",
@@ -643,6 +676,7 @@ impl MovieDialog {
         }
         self.receive();
         self.refresh_mode(&bookmarks.items);
+        self.sync_music_length();
         let Some(start) = self.start else { return };
         let running = self.job.is_some();
 
@@ -763,14 +797,26 @@ impl MovieDialog {
                     });
                 ui.end_row();
                 ui.label("Duration");
-                crate::ui::slider(
-                    ui,
-                    egui::Slider::new(&mut self.seconds, 1.0..=MAX_SLIDER_SECONDS)
-                        .logarithmic(true)
-                        .clamping(egui::SliderClamping::Never)
-                        .step_by(1.0)
-                        .suffix(" s"),
-                );
+                ui.horizontal(|ui| {
+                    let locked = self.duration_locked();
+                    ui.add_enabled_ui(!locked, |ui| {
+                        crate::ui::slider(
+                            ui,
+                            egui::Slider::new(&mut self.seconds, 1.0..=MAX_SLIDER_SECONDS)
+                                .logarithmic(true)
+                                .clamping(egui::SliderClamping::Never)
+                                .step_by(1.0)
+                                .suffix(" s"),
+                        );
+                    });
+                    ui.add_enabled(
+                        !self.music.is_empty(),
+                        egui::Checkbox::new(&mut self.match_music, "match music"),
+                    )
+                    .on_disabled_hover_text("add music to match its length");
+                });
+                // A click takes effect on this frame, before the specs below.
+                self.sync_music_length();
                 ui.end_row();
                 ui.label("");
                 ui.small(self.pace_text(self.current_spec(&bookmarks.items).as_ref()));
@@ -1468,6 +1514,96 @@ mod tests {
         assert_eq!(
             d.music_summary().as_deref(),
             Some("Plays in order with 4 s crossfades, looping to fill 20 min 00 s.")
+        );
+    }
+
+    #[test]
+    fn match_music_sets_duration() {
+        let mut d = MovieDialog {
+            music: vec![track("a.mp3", Ok(60.0)), track("b.mp3", Ok(30.0))],
+            match_music: true,
+            ..MovieDialog::default()
+        };
+        d.sync_music_length();
+        assert_eq!(d.seconds, 86.0);
+        d.move_track(1, true);
+        d.music.push(track("c.mp3", Ok(10.0)));
+        d.sync_music_length();
+        assert_eq!(d.seconds, playlist_length(&[30.0, 60.0, 10.0]).unwrap());
+    }
+
+    #[test]
+    fn matched_video_never_outlasts_the_music() {
+        let ts = [183.472, 201.115];
+        for fps in [24, 30, 60] {
+            let mut d = MovieDialog {
+                music: vec![track("a.mp3", Ok(ts[0])), track("b.mp3", Ok(ts[1]))],
+                match_music: true,
+                fps,
+                ..MovieDialog::default()
+            };
+            d.sync_music_length();
+            let spec = d.spec(&current());
+            let video = spec.frame_count() as f64 / fps as f64;
+            let music = playlist_length(&ts).unwrap();
+            assert!(video <= music, "{fps} fps: {video} > {music}");
+            assert!(
+                music - video < 1.0 / fps as f64,
+                "{fps} fps: more than a frame short"
+            );
+        }
+    }
+
+    #[test]
+    fn match_music_off_leaves_duration() {
+        let mut d = MovieDialog {
+            music: vec![track("a.mp3", Ok(60.0)), track("b.mp3", Ok(30.0))],
+            ..MovieDialog::default()
+        };
+        d.sync_music_length();
+        assert_eq!(d.seconds, 20.0);
+    }
+
+    #[test]
+    fn unmeasured_track_leaves_duration() {
+        let mut d = MovieDialog {
+            music: vec![track("a.mp3", Ok(60.0)), track("x.mp3", Err("bad".into()))],
+            match_music: true,
+            ..MovieDialog::default()
+        };
+        d.sync_music_length();
+        assert_eq!(d.seconds, 20.0);
+        d.music.clear();
+        d.sync_music_length();
+        assert_eq!(d.seconds, 20.0);
+    }
+
+    #[test]
+    fn duration_locks_only_while_music_sets_it() {
+        let mut d = MovieDialog {
+            music: vec![track("a.mp3", Ok(60.0))],
+            ..MovieDialog::default()
+        };
+        assert!(!d.duration_locked());
+        d.match_music = true;
+        assert!(d.duration_locked());
+        d.music.push(track("x.mp3", Err("bad".into())));
+        assert!(!d.duration_locked(), "unmeasured track");
+        d.music.clear();
+        assert!(!d.duration_locked(), "no music left");
+    }
+
+    #[test]
+    fn summary_when_matched() {
+        let mut d = MovieDialog {
+            music: vec![track("a.mp3", Ok(60.0)), track("b.mp3", Ok(30.0))],
+            match_music: true,
+            ..MovieDialog::default()
+        };
+        d.sync_music_length();
+        assert_eq!(
+            d.music_summary().as_deref(),
+            Some("Plays once through with 4 s crossfades: 1 min 26 s.")
         );
     }
 

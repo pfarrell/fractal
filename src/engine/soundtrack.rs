@@ -15,6 +15,10 @@ use std::time::Duration;
 pub const CROSSFADE_S: f64 = 4.0;
 /// Fade-in at the start and fade-out at the end, in seconds.
 pub const FADE_S: f64 = 3.0;
+/// A shortfall this small is left silent rather than looping back to the
+/// first track: a video is a whole number of frames and its probed length
+/// can run a hair past music it was sized to.
+pub const PLAY_SLACK_S: f64 = 0.1;
 /// Most track plays one soundtrack may list as ffmpeg inputs.
 pub const MAX_INPUTS: usize = 500;
 
@@ -34,8 +38,32 @@ fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
 }
 
+/// The overlap at each join: [`CROSSFADE_S`], but no more than half the
+/// shortest track.
+fn crossfade_for(track_secs: &[f64]) -> f64 {
+    let shortest = track_secs.iter().copied().fold(f64::INFINITY, f64::min);
+    CROSSFADE_S.min(shortest / 2.0)
+}
+
+/// How long the tracks last played once through in order, overlapped by
+/// the crossfade: a movie this long ends as the last track does. `None`
+/// with no tracks or a track without a usable length.
+pub fn playlist_length(track_secs: &[f64]) -> Option<f64> {
+    if track_secs.is_empty() || !track_secs.iter().all(|&t| positive(t)) {
+        return None;
+    }
+    let crossfade = crossfade_for(track_secs);
+    // The same running sum, in the same order, as `plan_soundtrack`, so a
+    // movie of this length plans each track exactly once.
+    let mut covered = 0.0;
+    for (plays, &t) in track_secs.iter().enumerate() {
+        covered += t - if plays == 0 { 0.0 } else { crossfade };
+    }
+    Some(covered)
+}
+
 /// Repeat the tracks in order until, overlapped by the crossfade, they
-/// cover `movie_secs`.
+/// cover `movie_secs` (to within [`PLAY_SLACK_S`]).
 pub fn plan_soundtrack(track_secs: &[f64], movie_secs: f64) -> Result<SoundtrackPlan, String> {
     if track_secs.is_empty() {
         return Err("no music tracks".into());
@@ -46,13 +74,12 @@ pub fn plan_soundtrack(track_secs: &[f64], movie_secs: f64) -> Result<Soundtrack
     if let Some(i) = track_secs.iter().position(|&t| !positive(t)) {
         return Err(format!("track {} has no usable length", i + 1));
     }
-    let shortest = track_secs.iter().copied().fold(f64::INFINITY, f64::min);
-    let crossfade = CROSSFADE_S.min(shortest / 2.0);
+    let crossfade = crossfade_for(track_secs);
     let n = track_secs.len();
     let mut sequence = Vec::new();
     let mut covered = 0.0;
     let mut plays = 0usize;
-    while covered < movie_secs {
+    while plays == 0 || covered < movie_secs - PLAY_SLACK_S {
         let i = plays % n;
         covered += track_secs[i] - if plays == 0 { 0.0 } else { crossfade };
         plays += 1;
