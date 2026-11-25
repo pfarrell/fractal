@@ -10,7 +10,7 @@ use fractal_explorer::engine::movie::{
     rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
-use fractal_explorer::engine::route::Stop;
+use fractal_explorer::engine::route::{RotationUnit, Stop};
 use fractal_explorer::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use std::ffi::OsString;
@@ -26,11 +26,13 @@ fn spec(out: PathBuf) -> MovieSpec {
                 center: Complex64::new(-0.5, 0.0),
                 span: 3.0,
                 rotation: 0.0,
+                rotation_unit: RotationUnit::PerSecond,
             },
             Stop {
                 center: Complex64::new(-0.743643887, 0.131825904),
                 span: 3.0e-6,
                 rotation: 0.0,
+                rotation_unit: RotationUnit::PerSecond,
             },
         ],
         fps: 30,
@@ -120,7 +122,7 @@ fn zero_rotation_matches_plain_sampler() {
 }
 
 #[test]
-fn frame_angle_is_rate_times_time() {
+fn frame_angle_ends_at_rate_times_time() {
     let mut sp = s();
     sp.stops[1].rotation = 6.0;
     assert_eq!(sp.frame_angle(0), 0.0);
@@ -812,6 +814,7 @@ fn stop(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
         center: Complex64::new(re, im),
         span,
         rotation,
+        rotation_unit: RotationUnit::PerSecond,
     }
 }
 
@@ -912,6 +915,12 @@ fn spin_in_place_is_a_valid_movie() {
     }
     let last = sp.frame_angle(sp.frame_count() - 1);
     assert!((last - 100f64.to_radians()).abs() < 1e-9, "{last}");
+
+    sp.stops[1].rotation = 360.0;
+    sp.stops[1].rotation_unit = RotationUnit::Total;
+    assert!(sp.validate().is_ok(), "{:?}", sp.validate());
+    let last = sp.frame_angle(sp.frame_count() - 1);
+    assert!((last - std::f64::consts::TAU).abs() < 1e-9, "{last}");
 }
 
 fn range_pool() -> rayon::ThreadPool {

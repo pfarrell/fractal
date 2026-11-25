@@ -9,7 +9,7 @@ use fractal_explorer::engine::preview::{
     runs_to_render, spawn_preview, window_at,
 };
 use fractal_explorer::engine::render::CancelToken;
-use fractal_explorer::engine::route::{JOINT_HALF_WIDTH_S, Stop};
+use fractal_explorer::engine::route::{RotationUnit, Stop};
 use fractal_explorer::engine::viewport::MaxIter;
 use num_complex::Complex64;
 use std::path::PathBuf;
@@ -22,6 +22,7 @@ fn st(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
         center: Complex64::new(re, im),
         span,
         rotation,
+        rotation_unit: RotationUnit::PerSecond,
     }
 }
 
@@ -44,6 +45,13 @@ fn folder(seconds: f64) -> MovieSpec {
         quality: Quality::Smooth,
         music: Vec::new(),
     }
+}
+
+/// `folder` with a fourth, deeper stop turning the same way as the third.
+fn folder4(seconds: f64) -> MovieSpec {
+    let mut sp = folder(seconds);
+    sp.stops.push(st(-0.7451, 0.1051, 3e-7, -5.0));
+    sp
 }
 
 #[test]
@@ -95,18 +103,19 @@ fn windows_clip_to_the_movie() {
 
 #[test]
 fn turn_change_keeps_earlier_fingerprints() {
-    let a = preview_spec(&folder(20.0));
+    // Editing the step from stop 2 to stop 3 moves the curve from stop 1 on.
+    let a = preview_spec(&folder4(20.0));
     let mut b = a.clone();
-    b.stops[2].rotation = 25.0;
-    let joint = a.route().step_times()[1];
+    b.stops[3].rotation = 25.0;
+    let times = a.route().step_times().to_vec();
     let mut kept = 0;
     let mut changed = 0;
     for i in 0..a.frame_count() {
         let t = a.frame_time(i);
-        if t < joint - JOINT_HALF_WIDTH_S {
+        if t < times[1] {
             assert_eq!(fingerprint(&a, i), fingerprint(&b, i), "frame {i}");
             kept += 1;
-        } else if t > joint + JOINT_HALF_WIDTH_S {
+        } else if t > times[2] + 1e-6 {
             assert_ne!(fingerprint(&a, i), fingerprint(&b, i), "frame {i}");
             changed += 1;
         }

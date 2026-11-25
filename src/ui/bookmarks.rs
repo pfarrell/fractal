@@ -4,6 +4,7 @@
 use crate::engine::bookmark::{
     Bookmark, BookmarkError, BookmarkStore, BookmarkView, folder_order, folders,
 };
+use crate::engine::route::RotationUnit;
 use eframe::egui;
 
 pub struct BookmarksUi {
@@ -65,6 +66,7 @@ impl BookmarksUi {
             view,
             folder,
             rotation: 0.0,
+            rotation_unit: RotationUnit::PerSecond,
         });
         match self.store.save(&self.items) {
             Ok(()) => self.save_error = None,
@@ -88,9 +90,10 @@ impl BookmarksUi {
         self.persist();
     }
 
-    /// Set the rotation (°/s) of the step arriving at bookmark `i`, and save.
-    pub fn set_rotation(&mut self, i: usize, deg_per_s: f64) {
-        self.items[i].rotation = deg_per_s;
+    /// Set the turn of the step arriving at bookmark `i`, and save.
+    pub fn set_rotation(&mut self, i: usize, value: f64, unit: RotationUnit) {
+        self.items[i].rotation = value;
+        self.items[i].rotation_unit = unit;
         self.persist();
     }
 
@@ -379,7 +382,8 @@ mod tests {
     fn set_rotation_persists() {
         let (dir, mut ui) = temp_ui();
         ui.add("home".into(), view(), Some("dive".into()));
-        ui.set_rotation(0, -12.5);
-        assert_eq!(reloaded(&dir)[0].rotation, -12.5);
+        ui.set_rotation(0, -145.0, RotationUnit::Total);
+        let b = &reloaded(&dir)[0];
+        assert_eq!((b.rotation, b.rotation_unit), (-145.0, RotationUnit::Total));
     }
 }

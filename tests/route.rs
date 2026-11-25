@@ -1,5 +1,5 @@
 use fractal_explorer::engine::route::{
-    JOINT_HALF_WIDTH_S, Route, Stop, outside_previous, step_length,
+    JOINT_HALF_WIDTH_S, RotationUnit, Route, Stop, outside_previous, step_length,
 };
 use num_complex::Complex64;
 
@@ -8,7 +8,21 @@ fn st(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
         center: Complex64::new(re, im),
         span,
         rotation,
+        rotation_unit: RotationUnit::PerSecond,
     }
+}
+
+/// A stop whose arriving step turns `degrees` in total.
+fn deg(re: f64, im: f64, span: f64, degrees: f64) -> Stop {
+    Stop {
+        rotation_unit: RotationUnit::Total,
+        ..st(re, im, span, degrees)
+    }
+}
+
+/// Radians per second at `at`, by central difference.
+fn speed(r: &Route, at: f64) -> f64 {
+    (r.angle_at(at + 1e-5) - r.angle_at(at - 1e-5)) / 2e-5
 }
 
 fn nested() -> Vec<Stop> {
@@ -125,26 +139,99 @@ fn steady_zoom_rate_on_nested_route() {
 }
 
 #[test]
-fn rotation_rate_mid_step_and_continuity() {
-    let mut stops = nested();
-    stops[1].rotation = 10.0;
-    stops[2].rotation = -20.0;
-    let r = Route::new(&stops, SECONDS, JOINT_HALF_WIDTH_S);
+fn total_turns_are_exact_at_every_stop() {
+    let mut s = nested();
+    s[1] = deg(-0.75, 0.1, 0.03, -145.0);
+    s[2].rotation = 10.0;
+    let r = Route::new(&s, SECONDS, JOINT_HALF_WIDTH_S);
     let t = r.step_times().to_vec();
-    let rate = |at: f64| (r.angle_at(at + 1e-4) - r.angle_at(at - 1e-4)) / 2e-4;
-    assert!((rate((t[0] + t[1]) / 2.0) - 10f64.to_radians()).abs() < 1e-6);
-    assert!((rate((t[1] + t[2]) / 2.0) - (-20f64).to_radians()).abs() < 1e-6);
-    assert!((r.angle_at(t[1] + 1e-9) - r.angle_at(t[1] - 1e-9)).abs() < 1e-6);
+    let want1 = (-145f64).to_radians();
+    let want2 = want1 + 10f64.to_radians() * (t[2] - t[1]);
+    assert_eq!(r.angle_at(0.0), 0.0);
+    assert!((r.angle_at(t[1]) - want1).abs() < 1e-12);
+    assert!((r.angle_at(t[2]) - want2).abs() < 1e-12);
+}
 
-    let two = Route::new(
-        &[st(-0.5, 0.0, 3.0, 0.0), st(-0.7, 0.1, 0.01, 6.0)],
-        10.0,
-        JOINT_HALF_WIDTH_S,
-    );
-    for i in 0..=10 {
-        let at = i as f64;
-        assert!((two.angle_at(at) - 6f64.to_radians() * at).abs() < 1e-12);
+/// −90°, −30°, +40° (a reversal at stop 2), then 0.
+fn mixed() -> Vec<Stop> {
+    vec![
+        st(-0.5, 0.0, 3.0, 0.0),
+        deg(-0.75, 0.1, 0.3, -90.0),
+        deg(-0.75, 0.1, 0.03, -30.0),
+        deg(-0.745, 0.105, 3e-3, 40.0),
+        deg(-0.745, 0.105, 3e-5, 0.0),
+    ]
+}
+
+#[test]
+fn rests_only_at_ends_reversals_and_zeros() {
+    let r = Route::new(&mixed(), 20.0, JOINT_HALF_WIDTH_S);
+    let t = r.step_times().to_vec();
+    assert!(speed(&r, 1e-5).abs() < 1e-3, "start");
+    assert!(speed(&r, t[1]) < -1e-3, "same sign keeps moving");
+    assert!(speed(&r, t[2]).abs() < 1e-3, "reversal");
+    assert!(speed(&r, t[3]).abs() < 1e-3, "next turn is 0");
+    assert!(speed(&r, 20.0 - 1e-5).abs() < 1e-3, "end");
+}
+
+#[test]
+fn never_overshoots_within_a_step() {
+    let r = Route::new(&mixed(), 20.0, JOINT_HALF_WIDTH_S);
+    let t = r.step_times().to_vec();
+    for k in 0..t.len() - 1 {
+        let (a, b) = (r.angle_at(t[k]), r.angle_at(t[k + 1]));
+        for j in 0..=200 {
+            let x = r.angle_at(t[k] + (t[k + 1] - t[k]) * j as f64 / 200.0);
+            assert!(
+                x >= a.min(b) - 1e-12 && x <= a.max(b) + 1e-12,
+                "step {k}: {x}"
+            );
+        }
     }
+}
+
+#[test]
+fn equal_rates_turn_at_constant_speed_inside() {
+    let s = vec![
+        st(-0.5, 0.0, 3.0, 0.0),
+        st(-0.75, 0.1, 0.3, 10.0),
+        st(-0.75, 0.1, 0.03, 10.0),
+        st(-0.745, 0.105, 3e-3, 10.0),
+    ];
+    let r = Route::new(&s, 20.0, JOINT_HALF_WIDTH_S);
+    let t = r.step_times().to_vec();
+    for j in 0..=10 {
+        let at = t[1] + (t[2] - t[1]) * j as f64 / 10.0;
+        assert!((speed(&r, at) - 10f64.to_radians()).abs() < 1e-6, "{at}");
+    }
+}
+
+#[test]
+fn total_turn_ignores_duration() {
+    for secs in [5.0, 12.0, 60.0] {
+        let r = Route::new(
+            &[st(-0.5, 0.0, 3.0, 0.0), deg(-0.7, 0.1, 0.01, -145.0)],
+            secs,
+            JOINT_HALF_WIDTH_S,
+        );
+        assert!((r.angle_at(secs) - (-145f64).to_radians()).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn zero_turns_stay_exactly_zero() {
+    let r = Route::new(&nested(), SECONDS, JOINT_HALF_WIDTH_S);
+    for i in 0..=48 {
+        assert_eq!(r.angle_at(i as f64 / 4.0), 0.0);
+    }
+}
+
+#[test]
+fn old_stop_json_loads_as_per_second() {
+    let s: Stop =
+        serde_json::from_str(r#"{"center":[0.0,0.0],"span":1.0,"rotation":5.0}"#).unwrap();
+    assert_eq!(s.rotation_unit, RotationUnit::PerSecond);
+    assert_eq!(s.rotation, 5.0);
 }
 
 #[test]
@@ -152,7 +239,7 @@ fn many_stops_in_a_short_movie_stay_finite() {
     let stops = [
         st(-0.5, 0.0, 3.0, 5.0),
         st(-0.75, 0.1, 0.3, -5.0),
-        st(-0.745, 0.11, 0.03, 30.0),
+        deg(-0.745, 0.11, 0.03, 270.0),
         st(-0.7455, 0.112, 0.003, 0.0),
         st(-0.74555, 0.1121, 3e-4, -30.0),
     ];

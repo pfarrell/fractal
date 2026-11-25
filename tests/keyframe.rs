@@ -7,7 +7,7 @@ use fractal_explorer::engine::keyframe::{
 };
 use fractal_explorer::engine::movie::{MovieSpec, RotatedSampler};
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, render};
-use fractal_explorer::engine::route::Stop;
+use fractal_explorer::engine::route::{RotationUnit, Stop};
 use fractal_explorer::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
 use num_complex::Complex64;
 use std::path::PathBuf;
@@ -21,11 +21,13 @@ fn two(c0: Complex64, s0: f64, c1: Complex64, s1: f64, rotation: f64) -> Vec<Sto
             center: c0,
             span: s0,
             rotation: 0.0,
+            rotation_unit: RotationUnit::PerSecond,
         },
         Stop {
             center: c1,
             span: s1,
             rotation,
+            rotation_unit: RotationUnit::PerSecond,
         },
     ]
 }
