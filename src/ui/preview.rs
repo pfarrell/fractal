@@ -7,6 +7,7 @@ use crate::engine::preview::{
     spawn_preview, window_at,
 };
 use crate::engine::render::CancelToken;
+use crate::engine::route::Stop;
 use eframe::egui;
 use std::ops::Range;
 use std::sync::Arc;
@@ -491,9 +492,14 @@ impl Preview {
             ui.separator();
             ui.label(format!("step {} → {}", k + 1, k + 2));
             ui.separator();
-            ui.label(format!("turn {:+.0} °/s", self.spec.stops[k + 1].rotation));
+            ui.label(turn_label(&self.spec.stops[k + 1]));
         });
     }
+}
+
+/// The readout's turn for the step arriving at `stop`, in its own unit.
+fn turn_label(stop: &Stop) -> String {
+    format!("turn {:+.0}{}", stop.rotation, stop.rotation_unit.suffix())
 }
 
 #[cfg(test)]
@@ -502,7 +508,7 @@ mod tests {
     use crate::engine::color::ColorSettings;
     use crate::engine::escape::FractalKind;
     use crate::engine::keyframe::Quality;
-    use crate::engine::route::{JOINT_HALF_WIDTH_S, RotationUnit, Stop};
+    use crate::engine::route::{RotationUnit, Stop};
     use crate::engine::viewport::MaxIter;
     use num_complex::Complex64;
     use std::path::PathBuf;
@@ -602,22 +608,33 @@ mod tests {
 
     #[test]
     fn restart_keeps_matching_frames() {
-        let f = final_spec(20.0);
+        let mut f = final_spec(20.0);
+        f.stops.push(st(-0.7451, 0.1051, 3e-7, -5.0));
         let mut p = Preview::new(&f);
         p.prepare(&f, 0);
         for i in p.window.clone() {
             insert(&mut p, i);
         }
         let mut g = f.clone();
-        g.stops[2].rotation = 25.0;
+        g.stops[3].rotation = 25.0;
         let runs = p.prepare(&g, 0);
-        let joint = p.spec.route().step_times()[1];
+        let stop1 = p.spec.route().step_times()[1];
         let first_changed = runs[0].start;
-        assert!(p.spec.frame_time(first_changed) >= joint - JOINT_HALF_WIDTH_S);
+        assert!(p.spec.frame_time(first_changed) >= stop1);
         for i in 0..first_changed {
             assert!(p.frame_rgb(i).is_some(), "frame {i} dropped");
         }
         assert_eq!(runs.last().unwrap().end, p.window.end);
+    }
+
+    #[test]
+    fn turn_label_shows_the_unit() {
+        assert_eq!(turn_label(&st(0.0, 0.0, 1.0, 10.0)), "turn +10 °/s");
+        let total = Stop {
+            rotation_unit: RotationUnit::Total,
+            ..st(0.0, 0.0, 1.0, -145.0)
+        };
+        assert_eq!(turn_label(&total), "turn -145 °");
     }
 
     #[test]
