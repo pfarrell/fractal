@@ -374,3 +374,14 @@ fn planned_at_playlist_length_plays_each_track_once() {
         assert_eq!(plan.sequence, (0..ts.len()).collect::<Vec<_>>(), "{ts:?}");
     }
 }
+
+#[test]
+fn a_video_a_hair_longer_than_the_music_adds_no_play() {
+    // The rendered video is a whole number of frames, and its probed length
+    // can run slightly past the music; that must not loop back to track 1.
+    let ts = [183.472, 201.115];
+    let len = playlist_length(&ts).unwrap();
+    let plan = plan_soundtrack(&ts, len + 0.05).unwrap();
+    assert_eq!(plan.sequence, vec![0, 1]);
+    assert_eq!(plan.length, len + 0.05);
+}

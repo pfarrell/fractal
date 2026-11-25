@@ -420,14 +420,16 @@ impl MovieDialog {
         self.match_music && self.music_length().is_some()
     }
 
-    /// While "match music" is on, set the duration to the music's length.
+    /// While "match music" is on, set the duration to the music's length,
+    /// rounded down to a whole frame so the video never outlasts the music.
     /// Left alone when there is no music or a track couldn't be measured.
     fn sync_music_length(&mut self) {
         if !self.match_music {
             return;
         }
         if let Some(len) = self.music_length() {
-            self.seconds = len;
+            let fps = self.fps as f64;
+            self.seconds = (len * fps).floor().max(2.0) / fps;
         }
     }
 
@@ -1528,6 +1530,28 @@ mod tests {
         d.music.push(track("c.mp3", Ok(10.0)));
         d.sync_music_length();
         assert_eq!(d.seconds, playlist_length(&[30.0, 60.0, 10.0]).unwrap());
+    }
+
+    #[test]
+    fn matched_video_never_outlasts_the_music() {
+        let ts = [183.472, 201.115];
+        for fps in [24, 30, 60] {
+            let mut d = MovieDialog {
+                music: vec![track("a.mp3", Ok(ts[0])), track("b.mp3", Ok(ts[1]))],
+                match_music: true,
+                fps,
+                ..MovieDialog::default()
+            };
+            d.sync_music_length();
+            let spec = d.spec(&current());
+            let video = spec.frame_count() as f64 / fps as f64;
+            let music = playlist_length(&ts).unwrap();
+            assert!(video <= music, "{fps} fps: {video} > {music}");
+            assert!(
+                music - video < 1.0 / fps as f64,
+                "{fps} fps: more than a frame short"
+            );
+        }
     }
 
     #[test]

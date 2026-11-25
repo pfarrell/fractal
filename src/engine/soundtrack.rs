@@ -15,6 +15,10 @@ use std::time::Duration;
 pub const CROSSFADE_S: f64 = 4.0;
 /// Fade-in at the start and fade-out at the end, in seconds.
 pub const FADE_S: f64 = 3.0;
+/// A shortfall this small is left silent rather than looping back to the
+/// first track: a video is a whole number of frames and its probed length
+/// can run a hair past music it was sized to.
+pub const PLAY_SLACK_S: f64 = 0.1;
 /// Most track plays one soundtrack may list as ffmpeg inputs.
 pub const MAX_INPUTS: usize = 500;
 
@@ -59,7 +63,7 @@ pub fn playlist_length(track_secs: &[f64]) -> Option<f64> {
 }
 
 /// Repeat the tracks in order until, overlapped by the crossfade, they
-/// cover `movie_secs`.
+/// cover `movie_secs` (to within [`PLAY_SLACK_S`]).
 pub fn plan_soundtrack(track_secs: &[f64], movie_secs: f64) -> Result<SoundtrackPlan, String> {
     if track_secs.is_empty() {
         return Err("no music tracks".into());
@@ -75,7 +79,7 @@ pub fn plan_soundtrack(track_secs: &[f64], movie_secs: f64) -> Result<Soundtrack
     let mut sequence = Vec::new();
     let mut covered = 0.0;
     let mut plays = 0usize;
-    while covered < movie_secs {
+    while plays == 0 || covered < movie_secs - PLAY_SLACK_S {
         let i = plays % n;
         covered += track_secs[i] - if plays == 0 { 0.0 } else { crossfade };
         plays += 1;
