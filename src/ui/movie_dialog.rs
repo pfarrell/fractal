@@ -201,8 +201,9 @@ pub struct MovieDialog {
     end_magnification: f64,
     fps: u32,
     seconds: f64,
-    /// Degrees per second the picture turns.
+    /// How far the picture turns, in `rotation_unit`.
     rotation: f64,
+    rotation_unit: RotationUnit,
     /// How frames are rendered: every one exactly, or from keyframes.
     quality: Quality,
     /// The last estimate, with the settings it was made for.
@@ -223,6 +224,27 @@ pub struct MovieDialog {
     ffprobe: Option<PathBuf>,
     /// Music to add, in play order.
     music: Vec<Track>,
+}
+
+/// A turn's slider and its °/s | ° switch. Switching keeps the number.
+/// The response is the slider's, marked changed when the unit changes.
+fn turn_row(ui: &mut egui::Ui, value: &mut f64, unit: &mut RotationUnit) -> egui::Response {
+    ui.horizontal(|ui| {
+        let mut resp = crate::ui::slider(
+            ui,
+            egui::Slider::new(value, unit.range())
+                .clamping(egui::SliderClamping::Never)
+                .step_by(1.0)
+                .suffix(unit.suffix()),
+        );
+        for u in RotationUnit::ALL {
+            if ui.selectable_value(unit, u, u.suffix().trim()).changed() {
+                resp.mark_changed();
+            }
+        }
+        resp
+    })
+    .inner
 }
 
 fn default_output() -> String {
@@ -251,6 +273,7 @@ impl Default for MovieDialog {
             fps: 30,
             seconds: 20.0,
             rotation: 0.0,
+            rotation_unit: RotationUnit::PerSecond,
             quality: Quality::Smooth,
             estimate: None,
             #[cfg(test)]
@@ -451,7 +474,7 @@ impl MovieDialog {
                     center: self.target,
                     span: DEFAULT_SPAN / self.end_magnification,
                     rotation: self.rotation,
-                    rotation_unit: RotationUnit::PerSecond,
+                    rotation_unit: self.rotation_unit,
                 },
             ],
             fps: self.fps,
@@ -754,12 +777,7 @@ impl MovieDialog {
                 ui.end_row();
                 if self.route == RouteMode::StartEnd {
                     ui.label("Rotation");
-                    crate::ui::slider(
-                        ui,
-                        egui::Slider::new(&mut self.rotation, -30.0..=30.0)
-                            .step_by(1.0)
-                            .suffix(" °/s"),
-                    );
+                    turn_row(ui, &mut self.rotation, &mut self.rotation_unit);
                     ui.end_row();
                 }
                 ui.label("Quality");
@@ -907,20 +925,16 @@ impl MovieDialog {
         for (k, (idx, stop)) in path.stops.iter().enumerate() {
             if let Some(p) = prev {
                 ui.label("  turn");
-                let mut rate = bookmarks.items[*idx].rotation;
-                let resp = crate::ui::slider(
-                    ui,
-                    egui::Slider::new(&mut rate, -30.0..=30.0)
-                        .step_by(1.0)
-                        .suffix(" °/s"),
-                );
+                let mut turn = bookmarks.items[*idx].rotation;
+                let mut unit = bookmarks.items[*idx].rotation_unit;
+                let resp = turn_row(ui, &mut turn, &mut unit);
                 if resp.changed() {
                     // Shown at once; written to disk when the edit ends.
-                    bookmarks.items[*idx].rotation = rate;
+                    bookmarks.items[*idx].rotation = turn;
+                    bookmarks.items[*idx].rotation_unit = unit;
                 }
                 if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-                    let unit = bookmarks.items[*idx].rotation_unit;
-                    bookmarks.set_rotation(*idx, rate, unit);
+                    bookmarks.set_rotation(*idx, turn, unit);
                 }
                 ui.end_row();
                 if outside_previous(&p, stop, self.width, self.height) {
@@ -1178,6 +1192,19 @@ mod tests {
     }
 
     #[test]
+    fn rotation_unit_reaches_the_spec() {
+        let mut d = MovieDialog::default();
+        assert_eq!(
+            d.spec(&current()).stops[1].rotation_unit,
+            RotationUnit::PerSecond
+        );
+        d.rotation = -145.0;
+        d.rotation_unit = RotationUnit::Total;
+        let s = d.spec(&current()).stops[1];
+        assert_eq!((s.rotation, s.rotation_unit), (-145.0, RotationUnit::Total));
+    }
+
+    #[test]
     fn durations_read_naturally() {
         assert_eq!(format_duration(42.0), "42 s");
         assert_eq!(format_duration(125.0), "2 min 05 s");
@@ -1272,12 +1299,14 @@ mod tests {
     fn folder_spec_uses_path_stops_and_first_colors() {
         let mut d = MovieDialog::default();
         d.open(current(), None);
-        let items = dive();
+        let mut items = dive();
+        items[0].rotation_unit = RotationUnit::Total;
         d.route = RouteMode::Folder("dive".into());
         let spec = d.current_spec(&items).unwrap();
         let spans: Vec<f64> = spec.stops.iter().map(|s| s.span).collect();
         assert_eq!(spans, [3.0, 0.03, 3e-5]);
         assert_eq!(spec.stops[2].rotation, -20.0);
+        assert_eq!(spec.stops[2].rotation_unit, RotationUnit::Total);
         assert_eq!(spec.color.offset, 0.25);
         assert_eq!(spec.max_iter, MaxIter::Fixed(500));
     }
@@ -1358,6 +1387,24 @@ mod tests {
             generation: Arc::new(AtomicU64::new(0)),
         });
         assert!(!d.can_preview(&dive()));
+    }
+
+    #[test]
+    fn estimate_reruns_when_unit_changes() {
+        let mut d = MovieDialog {
+            seconds: 2.0,
+            fps: 24,
+            width: 64,
+            height: 48,
+            rotation: 10.0,
+            ..MovieDialog::default()
+        };
+        let start = current();
+        d.estimate(&d.spec(&start), false);
+        assert_eq!(d.estimate_runs, 1);
+        d.rotation_unit = RotationUnit::Total;
+        d.estimate(&d.spec(&start), false);
+        assert_eq!(d.estimate_runs, 2);
     }
 
     #[test]
