@@ -6,8 +6,8 @@ use fractal_explorer::engine::escape::FractalKind;
 use fractal_explorer::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, plan};
 use fractal_explorer::engine::movie::{
     Kept, MovieError, MovieProgress, MovieSpec, RotatedSampler, Saved, ffmpeg_args,
-    ffmpeg_install_hint, find_program, render_exact_frame, render_movie, render_range,
-    rotated_point,
+    ffmpeg_install_hint, find_program, precision_floor, render_exact_frame, render_movie,
+    render_range, rotated_point,
 };
 use fractal_explorer::engine::render::{CancelToken, F64Sampler, Sampler};
 use fractal_explorer::engine::route::{RotationUnit, Stop};
@@ -1255,4 +1255,25 @@ fn ffprobe_missing_message_has_the_install_hint() {
             ffmpeg_install_hint()
         )
     );
+}
+
+#[test]
+fn clamp_depth_raises_too_deep_stops_to_the_floor() {
+    let mut sp = s();
+    sp.width = 1920;
+    sp.height = 1080;
+    let floor = precision_floor(sp.stops[1].center, sp.height);
+    sp.stops[1].span = floor / 2.0;
+    assert!(sp.validate_frames().is_err());
+    assert_eq!(sp.clamp_depth(), vec![1]);
+    assert_eq!(sp.stops[1].span, floor);
+    assert!(sp.validate_frames().is_ok(), "{:?}", sp.validate_frames());
+}
+
+#[test]
+fn clamp_depth_leaves_resolvable_stops() {
+    let mut sp = s();
+    let before = sp.stops.clone();
+    assert!(sp.clamp_depth().is_empty());
+    assert_eq!(sp.stops, before);
 }

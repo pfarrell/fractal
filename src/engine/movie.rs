@@ -52,6 +52,13 @@ pub fn rotated_point(view: &Viewport, angle: f64, x: f64, y: f64) -> Complex64 {
     view.center + Complex64::new(dx * cos - dy * sin, dx * sin + dy * cos)
 }
 
+/// The smallest span (frame height in the complex plane) a frame
+/// `height` pixels tall can have at `center` and still resolve each pixel
+/// in f64.
+pub fn precision_floor(center: Complex64, height: usize) -> f64 {
+    min_pixel_scale(center) * height as f64
+}
+
 /// One `iterate` per pixel, with the picture turned by `angle` radians.
 #[derive(Clone, Copy, Debug)]
 pub struct RotatedSampler {
@@ -311,7 +318,7 @@ impl MovieSpec {
         let last = self.stops.len() - 1;
         for (k, s) in self.stops.iter().enumerate() {
             // Small tolerance so "as deep as allowed" survives float rounding.
-            if s.span / (self.height as f64) < min_pixel_scale(s.center) * (1.0 - 1e-9) {
+            if s.span < precision_floor(s.center, self.height) * (1.0 - 1e-9) {
                 return Err(MovieError::Invalid(if k == last {
                     "end zoom is past the f64 precision limit for this point".into()
                 } else {
@@ -342,6 +349,22 @@ impl MovieSpec {
             return bad(format!("folder {} does not exist", dir.display()));
         }
         Ok(())
+    }
+
+    /// Raise every stop deeper than its [`precision_floor`] at this height
+    /// to that floor, so the movie renders as deep as f64 allows rather
+    /// than failing validation. Returns the indices of the stops raised.
+    pub fn clamp_depth(&mut self) -> Vec<usize> {
+        let height = self.height;
+        let mut raised = Vec::new();
+        for (k, s) in self.stops.iter_mut().enumerate() {
+            let floor = precision_floor(s.center, height);
+            if s.span < floor {
+                s.span = floor;
+                raised.push(k);
+            }
+        }
+        raised
     }
 
     pub fn frame_count(&self) -> usize {

@@ -5,7 +5,7 @@ use crate::engine::color::ColorSettings;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{
-    MovieError, MovieProgress, MovieSpec, Saved, find_ffmpeg, render_movie,
+    MovieError, MovieProgress, MovieSpec, Saved, find_ffmpeg, precision_floor, render_movie,
 };
 use crate::engine::preview::{frame_at_time, preview_spec};
 use crate::engine::render::CancelToken;
@@ -247,6 +247,11 @@ fn turn_row(ui: &mut egui::Ui, value: &mut f64, unit: &mut RotationUnit) -> egui
         resp
     })
     .inner
+}
+
+/// Under a stop raised to the precision limit: how deep it now goes.
+fn depth_note(magnification: f64, height: usize) -> String {
+    format!("limited to ×{magnification:.1e} at {height} px (f64 precision)")
 }
 
 fn default_output() -> String {
@@ -493,8 +498,10 @@ impl MovieDialog {
         text
     }
 
+    /// The start → end movie. A stop too deep for the frame height is
+    /// raised to the precision limit (as in [`Self::folder_spec`]).
     fn spec(&self, start: &MovieStart) -> MovieSpec {
-        MovieSpec {
+        let mut spec = MovieSpec {
             kind: start.kind,
             stops: vec![
                 Stop {
@@ -519,12 +526,16 @@ impl MovieDialog {
             output: PathBuf::from(&self.output),
             quality: self.quality,
             music: self.music.iter().map(|t| t.path.clone()).collect(),
-        }
+        };
+        spec.clamp_depth();
+        spec
     }
 
     /// The movie along a folder's path, with this dialog's frame settings.
+    /// A stop too deep for the frame height is raised to the precision
+    /// limit, so a bookmark saved in a shorter window still renders.
     fn folder_spec(&self, path: &FolderPath) -> MovieSpec {
-        MovieSpec {
+        let mut spec = MovieSpec {
             kind: path.kind,
             stops: path.stops.iter().map(|(_, s)| *s).collect(),
             fps: self.fps,
@@ -536,7 +547,9 @@ impl MovieDialog {
             output: PathBuf::from(&self.output),
             quality: self.quality,
             music: self.music.iter().map(|t| t.path.clone()).collect(),
-        }
+        };
+        spec.clamp_depth();
+        spec
     }
 
     /// The movie the current settings describe; `None` when a folder has
@@ -996,6 +1009,12 @@ impl MovieDialog {
                 DEFAULT_SPAN / stop.span
             ));
             ui.end_row();
+            let floor = precision_floor(stop.center, self.height);
+            if stop.span < floor {
+                ui.label("");
+                ui.small(depth_note(DEFAULT_SPAN / floor, self.height));
+                ui.end_row();
+            }
             prev = Some(*stop);
         }
         if path.skipped > 0 {
@@ -1339,6 +1358,54 @@ mod tests {
             filed("top", "dive", mandel(-0.5, 0.0, 3.0, 0.25), 5.0),
             filed("mid", "dive", mandel(-0.75, 0.1, 0.03, 0.5), 10.0),
         ]
+    }
+
+    #[test]
+    fn folder_too_deep_for_1080_is_clamped() {
+        let items = vec![
+            filed("top", "deep", mandel(-0.5, 0.0, 3.0, 0.25), 0.0),
+            filed("b9", "deep", mandel(-0.745, 0.105, 1.377e-12, 0.5), 0.0),
+        ];
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        d.route = RouteMode::Folder("deep".into());
+        // 720 px tall: within the limit, untouched.
+        let spec = d.current_spec(&items).unwrap();
+        assert_eq!(spec.stops[1].span, 1.377e-12);
+        for (w, h) in [(1920, 1080), (3840, 2160)] {
+            (d.width, d.height) = (w, h);
+            let spec = d.current_spec(&items).unwrap();
+            assert!(
+                spec.validate_frames().is_ok(),
+                "{h}: {:?}",
+                spec.validate_frames()
+            );
+            let floor = precision_floor(spec.stops[1].center, h);
+            assert_eq!(spec.stops[1].span, floor, "{h}");
+        }
+    }
+
+    #[test]
+    fn start_end_survives_a_taller_size() {
+        let mut d = MovieDialog::default();
+        d.target = Complex64::new(-0.745, 0.105);
+        d.end_magnification = DEFAULT_SPAN / precision_floor(d.target, d.height);
+        assert!(d.spec(&current()).validate_frames().is_ok());
+        (d.width, d.height) = (1920, 1080);
+        let spec = d.spec(&current());
+        assert!(
+            spec.validate_frames().is_ok(),
+            "{:?}",
+            spec.validate_frames()
+        );
+    }
+
+    #[test]
+    fn depth_note_text() {
+        assert_eq!(
+            depth_note(2.2e12, 1080),
+            "limited to ×2.2e12 at 1080 px (f64 precision)"
+        );
     }
 
     #[test]
