@@ -236,7 +236,14 @@ pub struct MovieDialog {
     layout: Option<Layout>,
     #[cfg(test)]
     stops_rect: egui::Rect,
+    #[cfg(test)]
+    preview_rect: egui::Rect,
+    /// Scroll the player into view on the next frame (a preview just began).
+    reveal_preview: bool,
 }
+
+/// Room between the stop list's scroll bar and the dialog's.
+const SCROLL_GUTTER: f32 = 12.0;
 
 /// Stops the path's list shows before it scrolls.
 const STOP_LIST_STOPS: f32 = 5.0;
@@ -257,6 +264,10 @@ fn stop_row_height(ui: &egui::Ui) -> f32 {
 #[derive(Clone, Copy, Debug)]
 struct Layout {
     dialog: egui::Rect,
+    /// The scrolling body's visible part.
+    body: egui::Rect,
+    /// The preview player, if one is shown.
+    preview: egui::Rect,
     buttons: egui::Rect,
     stops: egui::Rect,
     /// One grid row's height in the stop list.
@@ -336,6 +347,9 @@ impl Default for MovieDialog {
             layout: None,
             #[cfg(test)]
             stops_rect: egui::Rect::NOTHING,
+            #[cfg(test)]
+            preview_rect: egui::Rect::NOTHING,
+            reveal_preview: false,
         }
     }
 }
@@ -371,6 +385,9 @@ impl MovieDialog {
     /// Preview `spec` from movie time `t` (the window holding it).
     fn start_preview(&mut self, spec: &MovieSpec, t: f64, threads: usize, ctx: &egui::Context) {
         let start = frame_at_time(&preview_spec(spec), t);
+        // A new player appears at the bottom of the body, likely out of
+        // view: bring it in.
+        self.reveal_preview |= self.preview.is_none();
         let ctx = ctx.clone();
         self.preview
             .get_or_insert_with(|| Preview::new(spec))
@@ -383,7 +400,16 @@ impl MovieDialog {
         let current = self.current_spec(items);
         let Some(p) = &mut self.preview else { return };
         ui.separator();
-        let action = p.ui(ui, current.as_ref(), can);
+        let player = ui.scope(|ui| p.ui(ui, current.as_ref(), can));
+        let action = player.inner;
+        #[cfg(test)]
+        {
+            self.preview_rect = player.response.rect;
+        }
+        if self.reveal_preview {
+            player.response.scroll_to_me(Some(egui::Align::BOTTOM));
+            self.reveal_preview = false;
+        }
         let (window_start, window_end, here) = (
             p.spec().frame_time(p.window.start),
             p.spec()
@@ -839,6 +865,8 @@ impl MovieDialog {
             {
                 self.layout = Some(Layout {
                     dialog: egui::Rect::NOTHING,
+                    body: body.inner_rect,
+                    preview: self.preview_rect,
                     buttons: _buttons.response.rect,
                     stops: self.stops_rect,
                     stop_row_height: stop_row_height(ui),
@@ -873,6 +901,8 @@ impl MovieDialog {
                         .min(self.stops_content_height);
                     let rows = egui::ScrollArea::vertical()
                         .id_salt("movie_stops")
+                        // Keep this bar clear of the dialog's own.
+                        .max_width(ui.available_width() - SCROLL_GUTTER)
                         .max_height(height)
                         .min_scrolled_height(height)
                         .auto_shrink([false, true])
@@ -1501,6 +1531,15 @@ mod tests {
     /// Draw the dialog off-screen for a few frames in a `w`×`h` window,
     /// with a folder of `n` stops, and return what it laid out.
     fn lay_out(n: usize, w: f32, h: f32) -> Layout {
+        lay_out_with(n, w, h, |_, _| {})
+    }
+
+    fn lay_out_with(
+        n: usize,
+        w: f32,
+        h: f32,
+        setup: impl Fn(&mut MovieDialog, &[Bookmark]),
+    ) -> Layout {
         let dir = tempfile::tempdir().unwrap();
         let mut bookmarks = BookmarksUi::with_store(crate::engine::bookmark::BookmarkStore::new(
             dir.path().join("b.json"),
@@ -1519,9 +1558,12 @@ mod tests {
         let mut d = MovieDialog::default();
         d.open(current(), None);
         d.route = RouteMode::Folder("long".into());
+        setup(&mut d, &bookmarks.items);
         let ctx = egui::Context::default();
-        for _ in 0..4 {
+        for frame in 0..8 {
             let input = egui::RawInput {
+                // Scrolling animates over time.
+                time: Some(frame as f64),
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(w, h),
@@ -1551,6 +1593,32 @@ mod tests {
                 l.buttons
             );
         }
+    }
+
+    #[test]
+    fn stop_list_scrollbar_clears_the_dialogs() {
+        let l = lay_out(20, 1280.0, 720.0);
+        assert!(
+            l.stops.right() <= l.body.right() - SCROLL_GUTTER + 0.5,
+            "stops {:?} body {:?}",
+            l.stops,
+            l.body
+        );
+    }
+
+    #[test]
+    fn a_new_preview_is_scrolled_into_view() {
+        let l = lay_out_with(20, 1280.0, 720.0, |d, items| {
+            let spec = d.current_spec(items).unwrap();
+            d.preview = Some(Preview::new(&spec));
+            d.reveal_preview = true;
+        });
+        assert!(
+            l.preview.bottom() <= l.body.bottom() + 1.0 && l.preview.top() >= l.body.top() - 1.0,
+            "preview {:?} body {:?}",
+            l.preview,
+            l.body
+        );
     }
 
     #[test]
