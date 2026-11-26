@@ -190,6 +190,21 @@ pub enum RouteMode {
     Folder(String),
 }
 
+/// A magnification short enough for the slider's box: plain up to
+/// 99,999, then three significant digits, e.g. `3.30e297`.
+fn zoom_text(v: f64) -> String {
+    if v < 1e5 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.2e}")
+    }
+}
+
+/// A typed magnification, plain or scientific (`2500`, `1e30`).
+fn parse_zoom(s: &str) -> Option<f64> {
+    s.trim().parse().ok().filter(|v: &f64| v.is_finite())
+}
+
 pub struct MovieDialog {
     open: bool,
     route: RouteMode,
@@ -556,6 +571,17 @@ impl MovieDialog {
     pub fn set_target(&mut self, target: HiComplex, magnification: f64) {
         self.end_magnification = magnification;
         self.put_target(target);
+    }
+
+    /// The end bookmark's name while the end still matches it exactly.
+    fn end_label<'a>(&self, targets: &[(&'a str, HiComplex, f64)]) -> &'a str {
+        targets
+            .iter()
+            .find(|(_, center, span)| {
+                *center == self.target
+                    && (self.end_magnification * span / DEFAULT_SPAN - 1.0).abs() < 1e-9
+            })
+            .map_or("choose…", |(name, ..)| *name)
     }
 
     /// Set the end centre and show it in the fields.
@@ -1069,7 +1095,7 @@ impl MovieDialog {
         if !targets.is_empty() {
             ui.label("End from bookmark");
             egui::ComboBox::from_id_salt("movie_bookmark")
-                .selected_text("choose…")
+                .selected_text(self.end_label(&targets))
                 .show_ui(ui, |ui| {
                     for (name, center, span) in &targets {
                         if ui.selectable_label(false, *name).clicked() {
@@ -1117,7 +1143,10 @@ impl MovieDialog {
         let floor_mag = self.end_zoom_max();
         crate::ui::slider(
             ui,
-            egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag).logarithmic(true),
+            egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag)
+                .logarithmic(true)
+                .custom_formatter(|v, _| zoom_text(v))
+                .custom_parser(parse_zoom),
         );
         ui.end_row();
         ui.label("");
@@ -2024,6 +2053,31 @@ mod tests {
         d.reprobe_failed();
         let secs = d.music[0].probed.clone().unwrap();
         assert!((secs - 1.0).abs() < 0.1, "{secs}");
+    }
+
+    #[test]
+    fn end_picker_names_the_chosen_bookmark() {
+        let center = HiComplex::from_c64(Complex64::new(-0.7436, 0.1318));
+        let targets = vec![("seahorse", center.clone(), 1e-6)];
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        assert_eq!(d.end_label(&targets), "choose…");
+        d.set_target(center, DEFAULT_SPAN / 1e-6);
+        assert_eq!(d.end_label(&targets), "seahorse");
+        d.end_magnification *= 2.0;
+        assert_eq!(d.end_label(&targets), "choose…");
+    }
+
+    #[test]
+    fn zoom_text_stays_short() {
+        assert_eq!(zoom_text(950.0), "950");
+        assert_eq!(zoom_text(3.3e297), "3.30e297");
+        for v in [1.0, 12_345.0, 1e7, 4.56e123, 1.0e297] {
+            assert!(zoom_text(v).len() <= 8, "{}", zoom_text(v));
+        }
+        assert_eq!(parse_zoom("1e30"), Some(1e30));
+        assert_eq!(parse_zoom(" 2500 "), Some(2500.0));
+        assert_eq!(parse_zoom("abc"), None);
     }
 
     #[test]
