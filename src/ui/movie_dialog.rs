@@ -2,6 +2,7 @@
 
 use crate::engine::bookmark::{Bookmark, BookmarkView, FolderPath, folder_path, folders};
 use crate::engine::color::ColorSettings;
+use crate::engine::deep::HiComplex;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{
@@ -197,7 +198,7 @@ pub struct MovieDialog {
     /// Name of the start bookmark (`None` = current view).
     start_name: Option<String>,
     orbit_point: Option<Complex64>,
-    target: Complex64,
+    target: HiComplex,
     end_magnification: f64,
     fps: u32,
     seconds: f64,
@@ -321,7 +322,7 @@ impl Default for MovieDialog {
             start: None,
             start_name: None,
             orbit_point: None,
-            target: Complex64::new(0.0, 0.0),
+            target: Complex64::new(0.0, 0.0).into(),
             end_magnification: 1e10,
             fps: 30,
             seconds: 20.0,
@@ -440,7 +441,7 @@ impl MovieDialog {
         self.current = Some(start.clone());
         self.choose_start(None, start.clone());
         self.orbit_point = orbit_point;
-        self.target = start.view.center.to_c64();
+        self.target = start.view.center.clone();
         self.output = default_output();
         self.status = Status::Idle;
         self.find_tools();
@@ -544,7 +545,7 @@ impl MovieDialog {
     }
 
     /// Use a bookmark's center and zoom as the movie's destination.
-    pub fn set_target(&mut self, target: Complex64, magnification: f64) {
+    pub fn set_target(&mut self, target: HiComplex, magnification: f64) {
         self.target = target;
         self.end_magnification = magnification;
     }
@@ -572,13 +573,13 @@ impl MovieDialog {
             kind: start.kind,
             stops: vec![
                 Stop {
-                    center: start.view.center.to_c64(),
+                    center: start.view.center.clone(),
                     span: start.view.span,
                     rotation: 0.0,
                     rotation_unit: RotationUnit::PerSecond,
                 },
                 Stop {
-                    center: self.target,
+                    center: self.target.clone(),
                     span: DEFAULT_SPAN / self.end_magnification,
                     rotation: self.rotation,
                     rotation_unit: self.rotation_unit,
@@ -604,7 +605,7 @@ impl MovieDialog {
     fn folder_spec(&self, path: &FolderPath) -> MovieSpec {
         let mut spec = MovieSpec {
             kind: path.kind,
-            stops: path.stops.iter().map(|(_, s)| *s).collect(),
+            stops: path.stops.iter().map(|(_, s)| s.clone()).collect(),
             fps: self.fps,
             seconds: self.seconds,
             width: self.width,
@@ -1031,7 +1032,7 @@ impl MovieDialog {
                 .show_ui(ui, |ui| {
                     for (name, center, span) in &targets {
                         if ui.selectable_label(false, *name).clicked() {
-                            self.set_target(*center, DEFAULT_SPAN / span);
+                            self.set_target((*center).into(), DEFAULT_SPAN / span);
                         }
                     }
                 });
@@ -1039,28 +1040,24 @@ impl MovieDialog {
         }
         ui.label("End center");
         ui.horizontal(|ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.target.re)
-                    .speed(1e-6)
-                    .max_decimals(15),
-            );
-            ui.add(
-                egui::DragValue::new(&mut self.target.im)
-                    .speed(1e-6)
-                    .max_decimals(15),
-            );
+            let mut t = self.target.to_c64();
+            let a = ui.add(egui::DragValue::new(&mut t.re).speed(1e-6).max_decimals(15));
+            let b = ui.add(egui::DragValue::new(&mut t.im).speed(1e-6).max_decimals(15));
+            if a.changed() || b.changed() {
+                self.target = t.into();
+            }
             ui.label("i");
         });
         ui.end_row();
         if let Some(p) = self.orbit_point {
             ui.label("");
             if ui.button("Center end on orbit point").clicked() {
-                self.target = p;
+                self.target = p.into();
             }
             ui.end_row();
         }
         ui.label("End zoom");
-        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(self.target) * self.height as f64);
+        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(self.target.to_c64()) * self.height as f64);
         crate::ui::slider(
             ui,
             egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag).logarithmic(true),
@@ -1104,7 +1101,7 @@ impl MovieDialog {
         };
         let mut prev: Option<Stop> = None;
         for (k, (idx, stop)) in path.stops.iter().enumerate() {
-            if let Some(p) = prev {
+            if let Some(p) = &prev {
                 ui.label("  turn");
                 let mut turn = bookmarks.items[*idx].rotation;
                 let mut unit = bookmarks.items[*idx].rotation_unit;
@@ -1118,7 +1115,7 @@ impl MovieDialog {
                     bookmarks.set_rotation(*idx, turn, unit);
                 }
                 ui.end_row();
-                if outside_previous(&p, stop, self.width, self.height) {
+                if outside_previous(p, stop, self.width, self.height) {
                     ui.label("");
                     ui.colored_label(WARNING, SWINGS_ACROSS);
                     ui.end_row();
@@ -1131,13 +1128,13 @@ impl MovieDialog {
                 DEFAULT_SPAN / stop.span
             ));
             ui.end_row();
-            let floor = precision_floor(stop.center, self.height);
+            let floor = precision_floor(&path.kind, &stop.center, self.height);
             if stop.span < floor {
                 ui.label("");
                 ui.small(depth_note(DEFAULT_SPAN / floor, self.height));
                 ui.end_row();
             }
-            prev = Some(*stop);
+            prev = Some(stop.clone());
         }
         if path.skipped > 0 {
             ui.label("");
@@ -1389,7 +1386,7 @@ mod tests {
         );
         d.rotation = -145.0;
         d.rotation_unit = RotationUnit::Total;
-        let s = d.spec(&current()).stops[1];
+        let s = d.spec(&current()).stops[1].clone();
         assert_eq!((s.rotation, s.rotation_unit), (-145.0, RotationUnit::Total));
     }
 
@@ -1440,7 +1437,7 @@ mod tests {
             MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap(),
         );
         let spec = d.spec(d.start.as_ref().unwrap());
-        assert_eq!(spec.stops[0].center, Complex64::new(0.1, 0.2));
+        assert_eq!(spec.stops[0].center, Complex64::new(0.1, 0.2).into());
         assert_eq!(spec.stops[0].span, 0.5);
         assert_eq!(spec.kind, FractalKind::Multibrot { power: 3 });
         assert_eq!(d.start_name.as_deref(), Some("deep"));
@@ -1448,7 +1445,7 @@ mod tests {
         d.choose_start(None, d.current.clone().unwrap());
         assert_eq!(
             d.spec(d.start.as_ref().unwrap()).stops[0].center,
-            Complex64::new(-0.5, 0.0)
+            Complex64::new(-0.5, 0.0).into()
         );
         assert_eq!(d.start_name, None);
     }
@@ -1484,11 +1481,32 @@ mod tests {
         ]
     }
 
+    /// A Burning Ship bookmark: an f64-only kind, so it keeps the old
+    /// precision limit (Mandelbrot goes deeper by perturbation).
+    fn ship(re: f64, im: f64, span: f64, offset: f32) -> BookmarkView {
+        match mandel(re, im, span, offset) {
+            BookmarkView::Escape {
+                center,
+                span,
+                max_iter,
+                color,
+                ..
+            } => BookmarkView::Escape {
+                kind: FractalKind::BurningShip,
+                center,
+                span,
+                max_iter,
+                color,
+            },
+            other => other,
+        }
+    }
+
     #[test]
     fn folder_too_deep_for_1080_is_clamped() {
         let items = vec![
-            filed("top", "deep", mandel(-0.5, 0.0, 3.0, 0.25), 0.0),
-            filed("b9", "deep", mandel(-0.745, 0.105, 1.377e-12, 0.5), 0.0),
+            filed("top", "deep", ship(-0.5, 0.0, 3.0, 0.25), 0.0),
+            filed("b9", "deep", ship(-0.745, 0.105, 1.377e-12, 0.5), 0.0),
         ];
         let mut d = MovieDialog::default();
         d.open(current(), None);
@@ -1504,7 +1522,7 @@ mod tests {
                 "{h}: {:?}",
                 spec.validate_frames()
             );
-            let floor = precision_floor(spec.stops[1].center, h);
+            let floor = precision_floor(&spec.kind, &spec.stops[1].center, h);
             assert_eq!(spec.stops[1].span, floor, "{h}");
         }
     }
@@ -1512,8 +1530,9 @@ mod tests {
     #[test]
     fn start_end_survives_a_taller_size() {
         let mut d = MovieDialog::default();
-        d.target = Complex64::new(-0.745, 0.105);
-        d.end_magnification = DEFAULT_SPAN / precision_floor(d.target, d.height);
+        d.target = Complex64::new(-0.745, 0.105).into();
+        d.end_magnification =
+            DEFAULT_SPAN / precision_floor(&FractalKind::Mandelbrot, &d.target, d.height);
         assert!(d.spec(&current()).validate_frames().is_ok());
         (d.width, d.height) = (1920, 1080);
         let spec = d.spec(&current());

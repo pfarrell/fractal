@@ -20,7 +20,7 @@
 //! at the first and last stops, where the turn reverses, and next to a step
 //! that doesn't turn.
 
-use num_complex::Complex64;
+use crate::engine::deep::{HiComplex, bits_for};
 use serde::{Deserialize, Serialize};
 
 /// How a step's `rotation` is measured.
@@ -54,9 +54,9 @@ impl RotationUnit {
 }
 
 /// One point the camera passes through.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stop {
-    pub center: Complex64,
+    pub center: HiComplex,
     pub span: f64,
     /// How far the picture turns on the step arriving here, in
     /// `rotation_unit`; ignored on the first stop.
@@ -72,15 +72,18 @@ pub const JOINT_HALF_WIDTH_S: f64 = 0.5;
 /// Distance between two views in the (center, span) half-plane. For two
 /// views with the same center it is `|ln(b.span / a.span)|`.
 pub fn step_length(a: &Stop, b: &Stop) -> f64 {
-    let dc = (b.center - a.center).norm_sqr();
-    let ds = b.span - a.span;
-    (1.0 + (dc + ds * ds) / (2.0 * a.span * b.span)).acosh()
+    // Each term is divided by √(a·b) before squaring: the product a·b
+    // itself underflows to 0 for spans below about 1e-154.
+    let g = a.span.sqrt() * b.span.sqrt();
+    let dc = b.center.diff_c64(&a.center).norm() / g;
+    let ds = (b.span - a.span) / g;
+    (1.0 + (dc * dc + ds * ds) / 2.0).acosh()
 }
 
 /// `next`'s center lies outside the frame of `prev` (span is the frame's
 /// height) at this aspect ratio.
 pub fn outside_previous(prev: &Stop, next: &Stop, width: usize, height: usize) -> bool {
-    let d = next.center - prev.center;
+    let d = next.center.diff_c64(&prev.center);
     let half_h = prev.span / 2.0;
     let half_w = half_h * width as f64 / height.max(1) as f64;
     d.re.abs() > half_w || d.im.abs() > half_h
@@ -93,6 +96,8 @@ fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
 
 pub struct Route {
     stops: Vec<Stop>,
+    /// Precision of the route's centre arithmetic.
+    bits: usize,
     /// Movie time of each stop: 0 … seconds.
     times: Vec<f64>,
     /// Blend half-width at each stop (0 at the first and last).
@@ -170,8 +175,11 @@ impl Route {
         }
         let h: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
         let knot_rate = knot_rates(&h, &turns);
+        // Enough for a frame up to 8192 pixels tall at the deepest stop.
+        let min_span = stops.iter().map(|s| s.span).fold(f64::MAX, f64::min);
         Route {
             stops: stops.to_vec(),
+            bits: bits_for(min_span / 8192.0),
             times,
             half,
             knot_angle,
@@ -189,22 +197,25 @@ impl Route {
     }
 
     /// Step `k`'s straight zoom at time `t`, extended past its own ends.
-    fn step_view(&self, k: usize, t: f64) -> (Complex64, f64) {
+    fn step_view(&self, k: usize, t: f64) -> (HiComplex, f64) {
         let (a, b) = (&self.stops[k], &self.stops[k + 1]);
         let u = (t - self.times[k]) / (self.times[k + 1] - self.times[k]);
         let r = b.span / a.span;
         let span = a.span * r.powf(u);
+        let (ca, cb) = (a.center.with_bits(self.bits), &b.center);
         let center = if (1.0 - r).abs() < 1e-9 {
-            a.center + (b.center - a.center) * u
+            ca.lerp(cb, u)
         } else {
-            let fixed = (b.center - a.center * r) / (1.0 - r);
-            fixed + (a.center - fixed) * (span / a.span)
+            // (b − a·r)/(1 − r), written so a tiny r isn't lost: 1/(1 − r)
+            // would round to exactly 1 in f64 past ×10¹⁶.
+            let fixed = cb.add(&cb.sub(&ca).mul_f64(r / (1.0 - r)));
+            fixed.add(&ca.sub(&fixed).mul_f64(span / a.span))
         };
         (center, span)
     }
 
     /// The blend of steps `j − 1` and `j` around interior stop `j`.
-    fn joint_view(&self, j: usize, t: f64) -> (Complex64, f64) {
+    fn joint_view(&self, j: usize, t: f64) -> (HiComplex, f64) {
         let h = self.half[j];
         let w = smoothstep(self.times[j] - h, self.times[j] + h, t);
         let (ca, sa) = self.step_view(j - 1, t);
@@ -216,7 +227,7 @@ impl Route {
         let near = &self.stops[j - 1..=j + 1];
         let lo = near.iter().map(|s| s.span).fold(f64::MAX, f64::min);
         let hi = near.iter().map(|s| s.span).fold(f64::MIN, f64::max);
-        (ca + (cb - ca) * w, span.clamp(lo, hi))
+        (ca.lerp(&cb, w), span.clamp(lo, hi))
     }
 
     /// The step whose time range holds `t` (the last step holds the end).
@@ -226,13 +237,13 @@ impl Route {
     }
 
     /// (center, span) at movie time `t`.
-    pub fn view_at(&self, t: f64) -> (Complex64, f64) {
+    pub fn view_at(&self, t: f64) -> (HiComplex, f64) {
         let last = self.stops.len() - 1;
         if t <= 0.0 {
-            return (self.stops[0].center, self.stops[0].span);
+            return (self.stops[0].center.clone(), self.stops[0].span);
         }
         if t >= self.times[last] {
-            return (self.stops[last].center, self.stops[last].span);
+            return (self.stops[last].center.clone(), self.stops[last].span);
         }
         let k = self.step_at(t);
         if k >= 1 && t < self.times[k] + self.half[k] {

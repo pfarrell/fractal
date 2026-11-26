@@ -18,13 +18,13 @@ const TARGET: Complex64 = Complex64::new(-0.743643887, 0.131825904);
 fn two(c0: Complex64, s0: f64, c1: Complex64, s1: f64, rotation: f64) -> Vec<Stop> {
     vec![
         Stop {
-            center: c0,
+            center: c0.into(),
             span: s0,
             rotation: 0.0,
             rotation_unit: RotationUnit::PerSecond,
         },
         Stop {
-            center: c1,
+            center: c1.into(),
             span: s1,
             rotation,
             rotation_unit: RotationUnit::PerSecond,

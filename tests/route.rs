@@ -5,7 +5,7 @@ use num_complex::Complex64;
 
 fn st(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
     Stop {
-        center: Complex64::new(re, im),
+        center: Complex64::new(re, im).into(),
         span,
         rotation,
         rotation_unit: RotationUnit::PerSecond,
@@ -39,6 +39,7 @@ const FPS: f64 = 30.0;
 fn frames(route: &Route, seconds: f64, n: usize) -> Vec<(Complex64, f64)> {
     (0..n)
         .map(|i| route.view_at(i as f64 / (n - 1) as f64 * seconds))
+        .map(|(c, s)| (c.to_c64(), s))
         .collect()
 }
 
@@ -80,6 +81,7 @@ fn two_stops_match_the_straight_zoom() {
         let span = s0 * ratio.powf(u);
         let center = fixed + (c0 - fixed) * (span / s0);
         let (c, s) = r.view_at(u * 10.0);
+        let c = c.to_c64();
         assert!((s / span - 1.0).abs() < 1e-12, "frame {i}: {s} vs {span}");
         assert!((c - center).norm() < 1e-12 * span, "frame {i}");
     }
@@ -89,8 +91,8 @@ fn two_stops_match_the_straight_zoom() {
 fn first_and_last_views_are_exact() {
     let stops = nested();
     let r = Route::new(&stops, SECONDS, JOINT_HALF_WIDTH_S);
-    assert_eq!(r.view_at(0.0), (stops[0].center, stops[0].span));
-    assert_eq!(r.view_at(SECONDS), (stops[2].center, stops[2].span));
+    assert_eq!(r.view_at(0.0), (stops[0].center.clone(), stops[0].span));
+    assert_eq!(r.view_at(SECONDS), (stops[2].center.clone(), stops[2].span));
 }
 
 #[test]
@@ -98,7 +100,7 @@ fn passes_near_interior_stops() {
     let stops = nested();
     let r = Route::new(&stops, SECONDS, JOINT_HALF_WIDTH_S);
     let (c, s) = r.view_at(r.step_times()[1]);
-    assert!((c - stops[1].center).norm() < 0.05 * stops[1].span);
+    assert!(c.diff_c64(&stops[1].center).norm() < 0.05 * stops[1].span);
     assert!((s / stops[1].span - 1.0).abs() < 0.05, "{s}");
 }
 
@@ -247,14 +249,15 @@ fn many_stops_in_a_short_movie_stay_finite() {
     for i in 0..24 {
         let t = i as f64 / 23.0;
         let (c, s) = r.view_at(t);
+        let c = c.to_c64();
         assert!(
             c.re.is_finite() && c.im.is_finite() && s.is_finite() && s > 0.0,
             "{t}"
         );
         assert!(r.angle_at(t).is_finite());
     }
-    assert_eq!(r.view_at(0.0), (stops[0].center, stops[0].span));
-    assert_eq!(r.view_at(1.0), (stops[4].center, stops[4].span));
+    assert_eq!(r.view_at(0.0), (stops[0].center.clone(), stops[0].span));
+    assert_eq!(r.view_at(1.0), (stops[4].center.clone(), stops[4].span));
 }
 
 #[test]
@@ -287,5 +290,54 @@ fn never_dips_past_a_pan_stop() {
             .map(|f| f.1)
             .fold(f64::MAX, f64::min);
         assert!(min >= 1e-6 * (1.0 - 1e-9), "{seconds} s: {min}");
+    }
+}
+
+fn deep_point() -> fractal_explorer::engine::deep::HiComplex {
+    use fractal_explorer::engine::deep::{HiComplex, bits_for};
+    HiComplex::from_c64(Complex64::new(-0.75, 0.1))
+        .add_c64(Complex64::new(1e-60, 2e-61), bits_for(1e-80))
+}
+
+#[test]
+fn deep_step_length_is_finite() {
+    let a = Stop {
+        center: deep_point(),
+        span: 1e-280,
+        ..st(0.0, 0.0, 1.0, 0.0)
+    };
+    let b = Stop {
+        span: 1e-290,
+        ..a.clone()
+    };
+    let l = step_length(&a, &b);
+    assert!((l - 1e10_f64.ln()).abs() < 1e-9, "{l}");
+}
+
+#[test]
+fn deep_route_lands_on_stops() {
+    let stops = vec![
+        st(-0.5, 0.0, 3.0, 0.0),
+        Stop {
+            center: deep_point(),
+            span: 1e-50,
+            ..st(0.0, 0.0, 1.0, 0.0)
+        },
+        Stop {
+            center: deep_point(),
+            span: 1e-70,
+            ..st(0.0, 0.0, 1.0, 0.0)
+        },
+    ];
+    let r = Route::new(&stops, 10.0, JOINT_HALF_WIDTH_S);
+    for (k, s) in stops.iter().enumerate() {
+        let t = r.step_times()[k];
+        let (c, span) = r.view_at(t);
+        assert!(
+            (span / s.span - 1.0).abs() < 1e-9,
+            "stop {k}: span {span:e}"
+        );
+        let d = c.diff_c64(&s.center).norm();
+        assert!(d < 1e-3 * s.span, "stop {k}: off by {d:e}");
     }
 }

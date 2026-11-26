@@ -118,7 +118,7 @@ pub fn folder_path(items: &[Bookmark], folder: &str) -> Option<FolderPath> {
             continue;
         };
         let stop = Stop {
-            center,
+            center: center.into(),
             span,
             rotation: items[i].rotation,
             rotation_unit: items[i].rotation_unit,
