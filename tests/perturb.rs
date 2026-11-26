@@ -67,7 +67,7 @@ fn perturbed(view: &Viewport, max_iter: u32, angle: f64) -> Vec<Sample> {
 /// pixels differ by a few iterations from rounding alone).
 #[test]
 fn agrees_with_f64_past_switch() {
-    let view = Viewport::new(SEAHORSE, 3e-8, 64, 48);
+    let view = Viewport::new(SEAHORSE, 5e-13, 64, 48);
     assert!(uses_perturbation(&FractalKind::Mandelbrot, &view));
     let max_iter = auto_max_iter(view.magnification());
     let f = render_serial(
@@ -177,4 +177,19 @@ fn building_a_sampler_defers_the_orbit() {
     let s = PerturbSampler::new(&view, 2_000_000, 0.0);
     assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());
     drop(s);
+}
+
+/// Perturbation is about twice as slow as f64 per pixel, so f64 keeps
+/// every view it can still place: the switch sits near ×10¹¹ at 1080 px.
+#[test]
+fn switch_sits_near_the_f64_limit() {
+    let m = FractalKind::Mandelbrot;
+    assert!(!uses_perturbation(
+        &m,
+        &Viewport::new(SEAHORSE, 3e-10, 1920, 1080)
+    ));
+    assert!(uses_perturbation(
+        &m,
+        &Viewport::new(SEAHORSE, 1e-11, 1920, 1080)
+    ));
 }

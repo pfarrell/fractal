@@ -1388,8 +1388,8 @@ fn switch_over_has_no_jump() {
     use fractal_explorer::engine::render::render_serial;
     let mut sp = s();
     sp.stops[0].center = Complex64::new(-0.743643887, 0.131825904).into();
-    sp.stops[0].span = 3e-6;
-    sp.stops[1].span = 3e-12;
+    sp.stops[0].span = 3e-9;
+    sp.stops[1].span = 3e-16;
     sp.seconds = 40.0 / 30.0;
     sp.fps = 30;
     let flip = (0..sp.frame_count())

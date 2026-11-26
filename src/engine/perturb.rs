@@ -21,10 +21,10 @@ use num_complex::Complex64;
 use std::sync::{Arc, OnceLock};
 
 /// Perturbation takes over this far (in pixel spacing) before f64 runs
-/// out. f64's own rounding already misplaces a few percent of boundary
-/// pixels by ×10⁹ (measured against exact iteration), so the switch sits
-/// around ×10⁶ at 1080 px, where f64 still agrees on ~99.5%.
-pub const SWITCH: f64 = 1e6;
+/// out. It costs about twice f64's time per pixel, so f64 keeps every view
+/// it can still place: the switch sits near ×10¹¹ at 1080 px. (f64 already
+/// misplaces a few percent of boundary pixels there, as it always has.)
+pub const SWITCH: f64 = 10.0;
 
 /// `view` of `kind` is rendered by perturbation.
 pub fn uses_perturbation(kind: &FractalKind, view: &Viewport) -> bool {
