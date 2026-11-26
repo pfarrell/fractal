@@ -1,11 +1,11 @@
 //! Saved views, stored as JSON in the user's config directory.
 
 use crate::engine::color::ColorSettings;
+use crate::engine::deep::HiComplex;
 use crate::engine::escape::FractalKind;
 use crate::engine::ifs::IfsSystem;
 use crate::engine::route::{RotationUnit, Stop, step_length};
 use crate::engine::viewport::MaxIter;
-use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -14,14 +14,14 @@ use std::path::PathBuf;
 pub enum BookmarkView {
     Escape {
         kind: FractalKind,
-        center: Complex64,
+        center: HiComplex,
         span: f64,
         max_iter: MaxIter,
         color: ColorSettings,
     },
     Ifs {
         system: IfsSystem,
-        center: Complex64,
+        center: HiComplex,
         span: f64,
         points: u64,
         color: ColorSettings,
@@ -37,7 +37,7 @@ impl BookmarkView {
     }
 
     /// The same view (zoom, settings) centered on `c`.
-    pub fn with_center(mut self, c: Complex64) -> Self {
+    pub fn with_center(mut self, c: HiComplex) -> Self {
         match &mut self {
             BookmarkView::Escape { center, .. } | BookmarkView::Ifs { center, .. } => *center = c,
         }
@@ -112,28 +112,28 @@ pub fn folder_path(items: &[Bookmark], folder: &str) -> Option<FolderPath> {
             span,
             max_iter,
             color,
-        } = items[i].view
+        } = &items[i].view
         else {
             skipped += 1;
             continue;
         };
         let stop = Stop {
-            center: center.into(),
-            span,
+            center: center.clone(),
+            span: *span,
             rotation: items[i].rotation,
             rotation_unit: items[i].rotation_unit,
         };
         match &mut path {
             None => {
                 path = Some(FolderPath {
-                    kind,
-                    max_iter,
-                    color,
+                    kind: *kind,
+                    max_iter: *max_iter,
+                    color: *color,
                     stops: vec![(i, stop)],
                     skipped: 0,
                 })
             }
-            Some(p) if p.kind != kind => skipped += 1,
+            Some(p) if p.kind != *kind => skipped += 1,
             Some(p) => {
                 let prev = &p.stops.last().expect("first stop pushed").1;
                 if step_length(prev, &stop) > 0.0 {
@@ -238,8 +238,8 @@ mod tests {
     #[test]
     fn with_center_moves_only_the_center() {
         for b in samples() {
-            let c = Complex64::new(0.25, -0.125);
-            let moved = b.view.clone().with_center(c);
+            let c: HiComplex = Complex64::new(0.25, -0.125).into();
+            let moved = b.view.clone().with_center(c.clone());
             assert_eq!(moved.span(), b.view.span());
             match (&moved, &b.view) {
                 (
@@ -278,7 +278,7 @@ mod tests {
                 name: "seahorse".into(),
                 view: BookmarkView::Escape {
                     kind: FractalKind::Mandelbrot,
-                    center: Complex64::new(-0.743643887, 0.131825904),
+                    center: Complex64::new(-0.743643887, 0.131825904).into(),
                     span: 1e-6,
                     max_iter: MaxIter::Fixed(2000),
                     color: ColorSettings::default(),
@@ -291,7 +291,7 @@ mod tests {
                 name: "fern".into(),
                 view: BookmarkView::Ifs {
                     system: IfsSystem::barnsley_fern(),
-                    center: Complex64::new(0.0, 5.0),
+                    center: Complex64::new(0.0, 5.0).into(),
                     span: 10.5,
                     points: 5_000_000,
                     color: ColorSettings::default(),
@@ -299,6 +299,8 @@ mod tests {
             },
         ]
     }
+
+    use crate::engine::deep::{HiComplex, bits_for};
 
     #[test]
     fn missing_file_is_empty() {
@@ -313,6 +315,55 @@ mod tests {
         let store = BookmarkStore::new(dir.path().join("bookmarks.json"));
         store.save(&samples()).unwrap();
         assert_eq!(store.load().unwrap(), samples());
+    }
+
+    /// A file written before centres went high-precision.
+    const OLD_FILE: &str = r#"[{"name":"seahorse","view":{"Escape":{"kind":"Mandelbrot",
+        "center":[-0.743643887,0.131825904],"span":1e-6,"max_iter":{"Fixed":2000},
+        "color":COLOR}},"folder":"dive","rotation":7.5}]"#;
+
+    #[test]
+    fn old_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bookmarks.json");
+        let color = serde_json::to_string(&ColorSettings::default()).unwrap();
+        std::fs::write(&path, OLD_FILE.replace("COLOR", &color)).unwrap();
+        let items = BookmarkStore::new(path).load().unwrap();
+        assert_eq!(items, samples()[..1]);
+    }
+
+    #[test]
+    fn shallow_file_writes_number_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bookmarks.json");
+        let store = BookmarkStore::new(path.clone());
+        store.save(&samples()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\"re\": \""), "{text}");
+        let mut deep = samples();
+        deep[0].view = deep[0].view.clone().with_center(deep_center());
+        store.save(&deep).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"re\": \""), "{text}");
+    }
+
+    fn deep_center() -> HiComplex {
+        HiComplex::from_c64(Complex64::new(-0.743643887, 0.131825904))
+            .add_c64(Complex64::new(1e-290, 1e-295), bits_for(1e-300))
+    }
+
+    #[test]
+    fn deep_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BookmarkStore::new(dir.path().join("bookmarks.json"));
+        let mut deep = samples();
+        deep[0].view = deep[0].view.clone().with_center(deep_center());
+        store.save(&deep).unwrap();
+        let back = store.load().unwrap();
+        let BookmarkView::Escape { center, .. } = &back[0].view else {
+            panic!()
+        };
+        assert!(center.diff_c64(&deep_center()).norm() < 1e-300);
     }
 
     #[test]
@@ -341,7 +392,7 @@ mod tests {
             kind: FractalKind::Julia {
                 c: Complex64::new(f64::NAN, 0.0),
             },
-            center: Complex64::new(0.0, 0.0),
+            center: Complex64::new(0.0, 0.0).into(),
             span: 3.0,
             max_iter: MaxIter::Auto,
             color: ColorSettings::default(),
@@ -367,7 +418,7 @@ mod tests {
             name: name.into(),
             view: BookmarkView::Escape {
                 kind,
-                center: Complex64::new(re, 0.1),
+                center: Complex64::new(re, 0.1).into(),
                 span,
                 max_iter: MaxIter::Auto,
                 color: ColorSettings::default(),

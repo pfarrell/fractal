@@ -2,6 +2,7 @@
 //! outlines drawn over the picture.
 
 use crate::engine::color::{ColorSettings, colorize_density};
+use crate::engine::deep::HiComplex;
 use crate::engine::ifs::{AffineMap, Density, IfsSystem, chaos_game};
 use crate::engine::jobs::JobSlot;
 use crate::engine::viewport::{Viewport, min_pixel_scale};
@@ -196,8 +197,8 @@ impl IfsState {
     }
 
     /// Set the view's center and span (e.g. from a bookmark).
-    pub fn set_view(&mut self, center: Complex64, span: f64) {
-        self.view.center = center.into();
+    pub fn set_view(&mut self, center: HiComplex, span: f64) {
+        self.view.center = center;
         self.view.span = span;
         self.placed = true;
         self.needs_render = true;
@@ -329,7 +330,7 @@ mod tests {
     #[test]
     fn bookmarked_view_survives_first_sizing() {
         let mut s = IfsState::new(&egui::Context::default(), 1);
-        s.set_view(Complex64::new(0.1, 7.0), 0.5);
+        s.set_view(Complex64::new(0.1, 7.0).into(), 0.5);
         s.resize(800, 600);
         assert_eq!(
             (s.view.center.to_c64(), s.view.span),

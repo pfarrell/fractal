@@ -1,6 +1,7 @@
 //! The interactive fractal view: draws the rendered image and turns mouse
 //! input into zoom, pan, hover, and click.
 
+use crate::engine::deep::HiComplex;
 use crate::engine::viewport::Viewport;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, TextureHandle};
 use num_complex::Complex64;
@@ -9,10 +10,13 @@ use num_complex::Complex64;
 pub struct ViewResponse {
     /// Complex point under the cursor.
     pub hovered: Option<Complex64>,
+    /// Complex point under the cursor, at the view's precision.
+    pub hovered_hi: Option<HiComplex>,
     /// Complex point clicked (without dragging).
     pub clicked: Option<Complex64>,
-    /// Complex point right-clicked (where a context menu opens).
-    pub secondary_clicked: Option<Complex64>,
+    /// Complex point right-clicked (where a context menu opens), at the
+    /// view's precision.
+    pub secondary_clicked: Option<HiComplex>,
     /// The view's own response, for attaching a context menu.
     pub response: egui::Response,
     /// The view was zoomed or panned.
@@ -127,18 +131,24 @@ pub fn show_view(
         view.pixel_to_complex(x, y)
     };
     let hovered = response.hover_pos().map(to_complex);
+    let to_hi = |pos: Pos2| {
+        let (x, y) = mapping.to_pixel(pos);
+        view.pixel_to_hi(x, y)
+    };
+    let hovered_hi = response.hover_pos().map(to_hi);
     let clicked = if response.clicked() {
         response.interact_pointer_pos().map(to_complex)
     } else {
         None
     };
     let secondary_clicked = if response.secondary_clicked() {
-        response.interact_pointer_pos().map(to_complex)
+        response.interact_pointer_pos().map(to_hi)
     } else {
         None
     };
     ViewResponse {
         hovered,
+        hovered_hi,
         clicked,
         secondary_clicked,
         response,

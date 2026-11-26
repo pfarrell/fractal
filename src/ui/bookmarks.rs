@@ -332,7 +332,7 @@ mod tests {
     fn view() -> BookmarkView {
         BookmarkView::Escape {
             kind: FractalKind::Mandelbrot,
-            center: Complex64::new(-0.5, 0.0),
+            center: Complex64::new(-0.5, 0.0).into(),
             span: 3.0,
             max_iter: MaxIter::Auto,
             color: ColorSettings::default(),
