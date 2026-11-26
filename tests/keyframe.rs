@@ -143,11 +143,12 @@ fn every_frame_lies_inside_its_keyframe() {
         for (name, spec) in specs(Quality::Smooth) {
             for s in stretches(&plan(&spec, q, KEYFRAME_MAX_PIXELS)) {
                 let v = &s.view;
+                let vc = v.center.to_c64();
                 let k = v.pixel_scale();
                 let half_w = v.width as f64 * k / 2.0;
                 let half_h = v.height as f64 * k / 2.0;
-                let (left, right) = (v.center.re - half_w + k, v.center.re + half_w - k);
-                let (bottom, top) = (v.center.im - half_h + k, v.center.im + half_h - k);
+                let (left, right) = (vc.re - half_w + k, vc.re + half_w - k);
+                let (bottom, top) = (vc.im - half_h + k, vc.im + half_h - k);
                 for i in s.frames.clone() {
                     for c in spec.frame_corners(i) {
                         assert!(
@@ -178,10 +179,11 @@ fn frame_corners_follow_rotation() {
         v.span / 2.0,
     );
     let near = |a: Complex64, b: Complex64| (a - b).norm() < 1e-9;
-    assert!(near(tl, v.center + Complex64::new(-hh, -hw)), "{tl}");
-    assert!(near(tr, v.center + Complex64::new(-hh, hw)), "{tr}");
-    assert!(near(br, v.center + Complex64::new(hh, hw)), "{br}");
-    assert!(near(bl, v.center + Complex64::new(hh, -hw)), "{bl}");
+    let vc = v.center.to_c64();
+    assert!(near(tl, vc + Complex64::new(-hh, -hw)), "{tl}");
+    assert!(near(tr, vc + Complex64::new(-hh, hw)), "{tr}");
+    assert!(near(br, vc + Complex64::new(hh, hw)), "{br}");
+    assert!(near(bl, vc + Complex64::new(hh, -hw)), "{bl}");
 }
 
 #[test]
@@ -231,7 +233,7 @@ fn density_clamped_at_precision_floor() {
     };
     let blocks = plan(&spec, 2, KEYFRAME_MAX_PIXELS);
     for s in stretches(&blocks) {
-        let floor = min_pixel_scale(s.view.center);
+        let floor = min_pixel_scale(s.view.center.to_c64());
         assert!(
             s.view.pixel_scale() >= floor * (1.0 - 1e-9),
             "{:?}: {} < floor {floor}",
@@ -383,7 +385,7 @@ fn keyframe_matches_a_plain_render() {
         let view = Viewport::new(Complex64::new(-0.74, 0.12), 0.05, width, height);
         let s = Stretch {
             frames: 0..1,
-            view,
+            view: view.clone(),
             q: 2,
             max_iter: 300,
         };
@@ -406,7 +408,7 @@ fn same_grid_resample_is_exact() {
     let frame = Viewport::new(SEAHORSE, 0.02, 96, 54);
     let s = Stretch {
         frames: 0..1,
-        view: frame,
+        view: frame.clone(),
         q: 1,
         max_iter: 400,
     };
@@ -462,7 +464,7 @@ fn constant_keyframe_stays_constant() {
 #[test]
 fn quarter_turn_rotates_the_picture() {
     let view = Viewport::new(Complex64::new(0.0, 0.0), 2.0, 100, 100);
-    let kf = uniform_keyframe(view, |x, _| {
+    let kf = uniform_keyframe(view.clone(), |x, _| {
         if x < 50 {
             Sample::Inside
         } else {
@@ -492,7 +494,7 @@ fn quarter_turn_rotates_the_picture() {
 #[test]
 fn frame_cutoff_applies() {
     let view = Viewport::new(Complex64::new(0.0, 0.0), 2.0, 64, 64);
-    let kf = uniform_keyframe(view, |_, _| Sample::Escaped {
+    let kf = uniform_keyframe(view.clone(), |_, _| Sample::Escaped {
         iter: 800,
         smooth: 800.5,
     });

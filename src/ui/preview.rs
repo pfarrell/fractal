@@ -116,7 +116,7 @@ impl Preview {
                 .map(|j| &self.frames[j])
                 && *fp == fingerprint(&spec, i)
             {
-                *slot = Some((*fp, rgb.clone()));
+                *slot = Some((fp.clone(), rgb.clone()));
             }
         }
         if !window.contains(&self.playhead) {

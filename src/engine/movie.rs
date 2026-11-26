@@ -45,11 +45,18 @@ pub fn rotated_point(view: &Viewport, angle: f64, x: f64, y: f64) -> Complex64 {
     if angle == 0.0 {
         return view.pixel_to_complex(x, y);
     }
-    let s = view.pixel_scale();
-    let dx = (x - view.width as f64 / 2.0) * s;
-    let dy = -(y - view.height as f64 / 2.0) * s;
+    view.center.to_c64() + rotated_offset(view, angle, x, y)
+}
+
+/// Offset from `view`'s center of the point at pixel position (`x`, `y`)
+/// turned by `angle` radians (counterclockwise) about the center.
+pub fn rotated_offset(view: &Viewport, angle: f64, x: f64, y: f64) -> Complex64 {
+    let d = view.pixel_offset(x, y);
+    if angle == 0.0 {
+        return d;
+    }
     let (sin, cos) = angle.sin_cos();
-    view.center + Complex64::new(dx * cos - dy * sin, dx * sin + dy * cos)
+    Complex64::new(d.re * cos - d.im * sin, d.re * sin + d.im * cos)
 }
 
 /// The smallest span (frame height in the complex plane) a frame

@@ -60,7 +60,7 @@ struct Track {
 }
 
 /// The explorer state a movie starts from.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct MovieStart {
     pub kind: FractalKind,
     pub view: Viewport,
@@ -437,10 +437,10 @@ impl MovieDialog {
     /// Open the dialog starting from the current explorer view.
     pub fn open(&mut self, start: MovieStart, orbit_point: Option<Complex64>) {
         self.open = true;
-        self.current = Some(start);
-        self.choose_start(None, start);
+        self.current = Some(start.clone());
+        self.choose_start(None, start.clone());
         self.orbit_point = orbit_point;
-        self.target = start.view.center;
+        self.target = start.view.center.to_c64();
         self.output = default_output();
         self.status = Status::Idle;
         self.find_tools();
@@ -572,7 +572,7 @@ impl MovieDialog {
             kind: start.kind,
             stops: vec![
                 Stop {
-                    center: start.view.center,
+                    center: start.view.center.to_c64(),
                     span: start.view.span,
                     rotation: 0.0,
                     rotation_unit: RotationUnit::PerSecond,
@@ -623,7 +623,7 @@ impl MovieDialog {
     /// fewer than two usable stops (or the dialog was never opened).
     fn current_spec(&self, items: &[Bookmark]) -> Option<MovieSpec> {
         match &self.route {
-            RouteMode::StartEnd => self.start.map(|start| self.spec(&start)),
+            RouteMode::StartEnd => self.start.as_ref().map(|start| self.spec(start)),
             RouteMode::Folder(f) => folder_path(items, f)
                 .filter(|p| p.stops.len() >= 2)
                 .map(|p| self.folder_spec(&p)),
@@ -757,7 +757,9 @@ impl MovieDialog {
         self.receive();
         self.refresh_mode(&bookmarks.items);
         self.sync_music_length();
-        let Some(start) = self.start else { return };
+        let Some(start) = self.start.clone() else {
+            return;
+        };
         let running = self.job.is_some();
 
         let modal = egui::Modal::new(egui::Id::unique("movie_dialog")).show(ctx, |ui| {
@@ -778,8 +780,8 @@ impl MovieDialog {
                                 "Start ({}): {} at {:+.6} {:+.6}i, zoom {:.2e}",
                                 self.start_name.as_deref().unwrap_or("current view"),
                                 start.kind.label(),
-                                start.view.center.re,
-                                start.view.center.im,
+                                start.view.center.to_c64().re,
+                                start.view.center.to_c64().im,
                                 start.view.magnification()
                             ));
                             ui.small(
@@ -1211,7 +1213,9 @@ impl MovieDialog {
 
     /// "Start" row: the current view or any escape-time bookmark.
     fn start_picker(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark]) {
-        let Some(current) = self.current else { return };
+        let Some(current) = self.current.clone() else {
+            return;
+        };
         let (w, h) = (current.view.width, current.view.height);
         let starts: Vec<(&str, MovieStart)> = bookmarks
             .iter()
@@ -1408,7 +1412,7 @@ mod tests {
     fn start_from_bookmark_takes_its_whole_view() {
         let s = MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap();
         assert_eq!(s.kind, FractalKind::Multibrot { power: 3 });
-        assert_eq!(s.view.center, Complex64::new(0.1, 0.2));
+        assert_eq!(s.view.center.to_c64(), Complex64::new(0.1, 0.2));
         assert_eq!(s.view.span, 0.5);
         assert_eq!((s.view.width, s.view.height), (800, 600));
         assert_eq!(s.max_iter, MaxIter::Fixed(900));
@@ -1435,15 +1439,15 @@ mod tests {
             Some("deep".into()),
             MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap(),
         );
-        let spec = d.spec(&d.start.unwrap());
+        let spec = d.spec(d.start.as_ref().unwrap());
         assert_eq!(spec.stops[0].center, Complex64::new(0.1, 0.2));
         assert_eq!(spec.stops[0].span, 0.5);
         assert_eq!(spec.kind, FractalKind::Multibrot { power: 3 });
         assert_eq!(d.start_name.as_deref(), Some("deep"));
 
-        d.choose_start(None, d.current.unwrap());
+        d.choose_start(None, d.current.clone().unwrap());
         assert_eq!(
-            d.spec(&d.start.unwrap()).stops[0].center,
+            d.spec(d.start.as_ref().unwrap()).stops[0].center,
             Complex64::new(-0.5, 0.0)
         );
         assert_eq!(d.start_name, None);

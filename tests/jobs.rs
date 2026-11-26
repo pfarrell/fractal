@@ -47,7 +47,7 @@ fn request(view: Viewport, max_iter: u32, progressive: bool) -> RenderRequest {
 fn submit_then_poll_gets_final() {
     let (slot, count) = counting_slot(4);
     let view = Viewport::default_for(200, 100);
-    let generation = slot.submit(request(view, 200, false));
+    let generation = slot.submit(request(view.clone(), 200, false));
     wait_for(&count, 1);
     let out: RenderOutput = slot.poll().expect("output");
     assert!(out.final_pass);

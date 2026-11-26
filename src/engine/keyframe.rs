@@ -399,7 +399,7 @@ pub fn render_keyframe(
     pool: &rayon::ThreadPool,
     cancel: &CancelToken,
 ) -> Option<Keyframe> {
-    let view = s.view;
+    let view = s.view.clone();
     let (w, h, scale) = (view.width, view.height, view.pixel_scale());
     let inner = F64Sampler {
         kind,
@@ -413,7 +413,10 @@ pub fn render_keyframe(
         // `render` takes only the band's size from this; `BandSampler`
         // places every point on the keyframe's own grid.
         let band = Viewport::new(
-            Complex64::new(view.center.re, view.center.im - mid),
+            view.center.add_c64(
+                Complex64::new(0.0, -mid),
+                crate::engine::deep::bits_for(scale),
+            ),
             rows as f64 * scale,
             w,
             rows,
@@ -543,8 +546,9 @@ impl PixelMap {
         };
         // The frame's center in keyframe pixels, taken as offsets from the
         // keyframe's center so deep zooms keep their precision.
-        let cu = (frame.center.re - k.center.re) / scale + k.width as f64 / 2.0;
-        let cv = (k.center.im - frame.center.im) / scale + k.height as f64 / 2.0;
+        let d = frame.center.diff_c64(&k.center);
+        let cu = d.re / scale + k.width as f64 / 2.0;
+        let cv = -d.im / scale + k.height as f64 / 2.0;
         let (hw, hh) = (frame.width as f64 / 2.0, frame.height as f64 / 2.0);
         let (ux, uy, vx, vy) = (r * cos, r * sin, -r * sin, r * cos);
         PixelMap {

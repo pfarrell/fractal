@@ -54,7 +54,7 @@ fn s() -> MovieSpec {
 #[test]
 fn first_frame_is_start() {
     let v = s().frame_view(0);
-    assert_eq!(v.center, s().stops[0].center);
+    assert_eq!(v.center.to_c64(), s().stops[0].center);
     assert_eq!(v.span, 3.0);
     assert_eq!((v.width, v.height), (64, 48));
 }
@@ -90,7 +90,7 @@ fn pixels_apart(
 fn last_frame_is_centered_on_target() {
     let sp = s();
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert!(pixels_apart(&last, last.center, sp.stops[1].center) < 0.01);
+    assert!(pixels_apart(&last, last.center.to_c64(), sp.stops[1].center) < 0.01);
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn off_center_bookmark_end_view_is_hit_exactly() {
     sp.stops[1].center = Complex64::new(-1.25, 0.4);
     sp.stops[1].span = 1e-9;
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert!(pixels_apart(&last, last.center, sp.stops[1].center) < 0.01);
+    assert!(pixels_apart(&last, last.center.to_c64(), sp.stops[1].center) < 0.01);
     assert!((last.span - 1e-9).abs() < 1e-21);
 }
 
@@ -179,8 +179,8 @@ fn equal_spans_pan_straight_to_target() {
     let n = sp.frame_count();
     let mid = sp.frame_view((n - 1) / 2);
     let last = sp.frame_view(n - 1);
-    assert!(mid.center.re.is_finite() && mid.center.im.is_finite());
-    assert!((last.center - sp.stops[1].center).norm() < 1e-12);
+    assert!(mid.center.to_c64().re.is_finite() && mid.center.to_c64().im.is_finite());
+    assert!((last.center.to_c64() - sp.stops[1].center).norm() < 1e-12);
     assert_eq!(last.span, sp.stops[0].span);
 }
 
@@ -834,8 +834,14 @@ fn three_stop_spec_hits_first_and_last() {
     let sp = three_stops(PathBuf::from("/tmp/unused.mp4"));
     let first = sp.frame_view(0);
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert_eq!((first.center, first.span), (sp.stops[0].center, 3.0));
-    assert_eq!((last.center, last.span), (sp.stops[2].center, 3e-5));
+    assert_eq!(
+        (first.center.to_c64(), first.span),
+        (sp.stops[0].center, 3.0)
+    );
+    assert_eq!(
+        (last.center.to_c64(), last.span),
+        (sp.stops[2].center, 3e-5)
+    );
 }
 
 #[test]
@@ -911,7 +917,10 @@ fn spin_in_place_is_a_valid_movie() {
     assert!(sp.validate().is_ok(), "{:?}", sp.validate());
     for i in [0, sp.frame_count() / 2, sp.frame_count() - 1] {
         let v = sp.frame_view(i);
-        assert_eq!((v.center, v.span), (sp.stops[0].center, sp.stops[0].span));
+        assert_eq!(
+            (v.center.to_c64(), v.span),
+            (sp.stops[0].center, sp.stops[0].span)
+        );
     }
     let last = sp.frame_angle(sp.frame_count() - 1);
     assert!((last - 100f64.to_radians()).abs() < 1e-9, "{last}");

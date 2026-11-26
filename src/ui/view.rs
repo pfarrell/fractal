@@ -42,6 +42,11 @@ impl ScreenMapping {
     /// Screen position of a complex point in `view`.
     pub fn to_screen(&self, view: &Viewport, z: Complex64) -> Pos2 {
         let (x, y) = view.complex_to_pixel(z);
+        self.pixel_to_screen(x, y)
+    }
+
+    /// Screen position of physical pixel coordinate (x, y).
+    pub fn pixel_to_screen(&self, x: f64, y: f64) -> Pos2 {
         Pos2::new(
             self.rect.min.x + x as f32 / self.ppp,
             self.rect.min.y + y as f32 / self.ppp,
@@ -65,10 +70,13 @@ const ZOOM_STEP: f64 = 1.2;
 /// texture plus the viewport it was rendered for; if that differs from
 /// `view` (mid-pan, mid-zoom, or a low-res preview) it is drawn stretched
 /// to where that region now sits, so the old image slides with the mouse.
+/// `floor` is the smallest pixel spacing zooming may reach (see
+/// [`crate::engine::viewport::pixel_floor`]).
 pub fn show_view(
     ui: &mut egui::Ui,
     image: Option<(&TextureHandle, &Viewport)>,
     view: &mut Viewport,
+    floor: f64,
 ) -> ViewResponse {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -86,7 +94,7 @@ pub fn show_view(
         let mut factor = ZOOM_STEP.powf(scroll as f64 / SCROLL_PER_STEP);
         factor *= pinch as f64;
         if factor != 1.0 {
-            view.zoom_about(px, py, factor);
+            view.zoom_about(px, py, factor, floor);
             view_changed = true;
         }
     }
@@ -100,11 +108,15 @@ pub fn show_view(
 
     if let Some((texture, shown)) = image {
         // Where the rendered region's corners land in the current view.
-        let top_left = shown.pixel_to_complex(0.0, 0.0);
-        let bottom_right = shown.pixel_to_complex(shown.width as f64, shown.height as f64);
+        // Worked in offsets from the current center, so it holds at depth.
+        let shift = shown.center.diff_c64(&view.center);
+        let corner = |x: f64, y: f64| {
+            let (px, py) = view.offset_to_pixel(shift + shown.pixel_offset(x, y));
+            mapping.pixel_to_screen(px, py)
+        };
         let target = Rect::from_min_max(
-            mapping.to_screen(view, top_left),
-            mapping.to_screen(view, bottom_right),
+            corner(0.0, 0.0),
+            corner(shown.width as f64, shown.height as f64),
         );
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         painter.image(texture.id(), target, uv, Color32::WHITE);
