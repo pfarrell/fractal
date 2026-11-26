@@ -24,7 +24,7 @@ window.onload = function() {
     var pany = 0;
     var zoom = 300;
     // The maximum number of iterations per pixel
-    var maxiterations = 500;
+    var maxiterations = 1000;
     
     // Palette array of 256 colors
     var palette = [];
@@ -59,7 +59,7 @@ window.onload = function() {
         // Calculate a gradient
         var roffset = 24;
         var goffset = 16;
-        var boffset = 0;
+        var boffset = 25;
         for (var i=0; i<256; i++) {
             palette[i] = { r:roffset, g:goffset, b:boffset};
             
