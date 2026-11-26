@@ -72,12 +72,13 @@ pub const JOINT_HALF_WIDTH_S: f64 = 0.5;
 /// Distance between two views in the (center, span) half-plane. For two
 /// views with the same center it is `|ln(b.span / a.span)|`.
 pub fn step_length(a: &Stop, b: &Stop) -> f64 {
-    // Each term is divided by √(a·b) before squaring: the product a·b
-    // itself underflows to 0 for spans below about 1e-154.
+    // acosh(1 + h²/2) with h² = (|Δc|² + Δs²)/(a·b), written as
+    // 2·asinh(h/2) so nothing is squared: a·b underflows below spans of
+    // about 1e-154, and h² overflows for deep stops far apart.
     let g = a.span.sqrt() * b.span.sqrt();
     let dc = b.center.diff_c64(&a.center).norm() / g;
     let ds = (b.span - a.span) / g;
-    (1.0 + (dc * dc + ds * ds) / 2.0).acosh()
+    2.0 * (dc.hypot(ds) / 2.0).asinh()
 }
 
 /// `next`'s center lies outside the frame of `prev` (span is the frame's

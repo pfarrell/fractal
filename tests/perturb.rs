@@ -122,7 +122,8 @@ fn rebasing_carries_pixels_past_reference() {
         .add_c64(Complex64::new(4e-11, 0.0), bits_for(1e-13));
     let view = Viewport::new(center, 3e-10, 48, 36);
     let max_iter = 2000;
-    let reference = PerturbSampler::new(&view, max_iter, 0.0).reference_len();
+    // The stored orbit ends with the escaping value: Z₀ … Z_k, k = escape.
+    let reference = PerturbSampler::new(&view, max_iter, 0.0).reference_len() - 1;
     assert!(reference < 100, "centre escapes after {reference}");
     let slow = slow_render(&view, max_iter);
     let longer = slow
@@ -159,4 +160,21 @@ fn sampler_for_picks_the_f64_path_when_shallow() {
     };
     assert!(render_serial(&*s, &view) == render_serial(&plain, &view));
     let _: &dyn Sampler = &*s;
+}
+
+#[test]
+fn centre_outside_bailout_does_not_panic() {
+    let view = Viewport::new(Complex64::new(300.0, 0.0), 1e-20, 16, 12);
+    let out = perturbed(&view, 500, 0.0);
+    assert!(out.iter().all(|s| iter_of(s) == Some(1)), "{:?}", &out[..3]);
+}
+
+#[test]
+fn building_a_sampler_defers_the_orbit() {
+    // c = -1 is inside the set: the reference never escapes.
+    let view = Viewport::new(Complex64::new(-1.0, 0.0), 3e-250, 16, 12);
+    let t = std::time::Instant::now();
+    let s = PerturbSampler::new(&view, 2_000_000, 0.0);
+    assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());
+    drop(s);
 }

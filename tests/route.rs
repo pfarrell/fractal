@@ -341,3 +341,19 @@ fn deep_route_lands_on_stops() {
         assert!(d < 1e-3 * s.span, "stop {k}: off by {d:e}");
     }
 }
+
+#[test]
+fn far_apart_deep_stops_pace_finitely() {
+    let stops = vec![
+        st(-0.5, 0.0, 3.0, 0.0),
+        st(-0.75, 0.0, 1e-200, 0.0),
+        st(-0.7499, 0.0, 1e-200, 0.0),
+    ];
+    for w in stops.windows(2) {
+        let l = step_length(&w[0], &w[1]);
+        assert!(l.is_finite() && l > 0.0, "{l}");
+    }
+    let r = Route::new(&stops, 20.0, JOINT_HALF_WIDTH_S);
+    let t = r.step_times();
+    assert!(t[1] > 1.0, "the dive gets no time: {t:?}");
+}

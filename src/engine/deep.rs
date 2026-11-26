@@ -32,6 +32,14 @@ pub fn bits_for(pixel_scale: f64) -> usize {
 pub struct HiComplex {
     re: F,
     im: F,
+    /// The nearest f64 value, kept so per-pixel code can read it for free.
+    approx: Complex64,
+}
+
+/// Build from parts, caching the f64 approximation.
+fn mk(re: F, im: F) -> HiComplex {
+    let approx = Complex64::new(to_f64(&re), to_f64(&im));
+    HiComplex { re, im, approx }
 }
 
 impl PartialEq for HiComplex {
@@ -78,15 +86,12 @@ impl From<Complex64> for HiComplex {
 impl HiComplex {
     /// `z` exactly (an f64 fits in 53 bits).
     pub fn from_c64(z: Complex64) -> Self {
-        HiComplex {
-            re: from_f64(z.re),
-            im: from_f64(z.im),
-        }
+        mk(from_f64(z.re), from_f64(z.im))
     }
 
     /// Nearest f64 value.
     pub fn to_c64(&self) -> Complex64 {
-        Complex64::new(to_f64(&self.re), to_f64(&self.im))
+        self.approx
     }
 
     /// `self − other`, computed at full precision then rounded to f64.
@@ -100,40 +105,31 @@ impl HiComplex {
     /// `self + d`, held at no fewer than `bits` bits.
     pub fn add_c64(&self, d: Complex64, bits: usize) -> HiComplex {
         let p = self.bits().max(bits);
-        HiComplex {
-            re: at_bits(&self.re, p) + from_f64(d.re),
-            im: at_bits(&self.im, p) + from_f64(d.im),
-        }
+        mk(
+            at_bits(&self.re, p) + from_f64(d.re),
+            at_bits(&self.im, p) + from_f64(d.im),
+        )
     }
 
     pub fn add(&self, o: &HiComplex) -> HiComplex {
-        HiComplex {
-            re: &self.re + &o.re,
-            im: &self.im + &o.im,
-        }
+        mk(&self.re + &o.re, &self.im + &o.im)
     }
 
     pub fn sub(&self, o: &HiComplex) -> HiComplex {
-        HiComplex {
-            re: &self.re - &o.re,
-            im: &self.im - &o.im,
-        }
+        mk(&self.re - &o.re, &self.im - &o.im)
     }
 
     /// Complex product.
     pub fn mul(&self, o: &HiComplex) -> HiComplex {
-        HiComplex {
-            re: &self.re * &o.re - &self.im * &o.im,
-            im: &self.re * &o.im + &self.im * &o.re,
-        }
+        mk(
+            &self.re * &o.re - &self.im * &o.im,
+            &self.re * &o.im + &self.im * &o.re,
+        )
     }
 
     pub fn mul_f64(&self, k: f64) -> HiComplex {
         let k = from_f64(k);
-        HiComplex {
-            re: &self.re * &k,
-            im: &self.im * &k,
-        }
+        mk(&self.re * &k, &self.im * &k)
     }
 
     /// `self + (o − self)·w`.
@@ -143,10 +139,7 @@ impl HiComplex {
 
     /// The same value held at `bits` bits (rounded if fewer).
     pub fn with_bits(&self, bits: usize) -> HiComplex {
-        HiComplex {
-            re: at_bits(&self.re, bits),
-            im: at_bits(&self.im, bits),
-        }
+        mk(at_bits(&self.re, bits), at_bits(&self.im, bits))
     }
 
     /// Precision in bits (the larger of the two parts).
@@ -167,10 +160,7 @@ impl HiComplex {
     /// Parse two decimals (optional sign, digits, optional fraction,
     /// optional exponent). Precision follows the digits given.
     pub fn parse(re: &str, im: &str) -> Result<HiComplex, ParseHiError> {
-        Ok(HiComplex {
-            re: parse_decimal(re)?,
-            im: parse_decimal(im)?,
-        })
+        Ok(mk(parse_decimal(re)?, parse_decimal(im)?))
     }
 
     /// True when the value is exactly an f64 pair.

@@ -6,6 +6,7 @@
 
 use crate::engine::deep::{HiComplex, bits_for};
 use crate::engine::escape::FractalKind;
+use crate::engine::perturb::SWITCH;
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
@@ -137,8 +138,7 @@ impl Viewport {
         let ratio = new_span / self.span;
         // anchor − (anchor − center)·ratio = center + offset·(1 − ratio)
         let offset = self.pixel_offset(x, y);
-        let bits = bits_for(new_span / self.height.max(1) as f64);
-        self.center = self.center.add_c64(offset * (1.0 - ratio), bits);
+        self.move_center(offset * (1.0 - ratio), new_span / self.height.max(1) as f64);
         self.span = new_span;
         !clamped
     }
@@ -146,9 +146,20 @@ impl Viewport {
     /// Move the view so the content follows a drag of (dx, dy) pixels.
     pub fn pan_pixels(&mut self, dx: f64, dy: f64) {
         let s = self.pixel_scale();
-        self.center = self
-            .center
-            .add_c64(Complex64::new(-dx * s, dy * s), bits_for(s));
+        self.move_center(Complex64::new(-dx * s, dy * s), s);
+    }
+
+    /// Move the center by `delta` for a view whose pixels end up
+    /// `pixel_scale` apart. Where f64 is still plenty (shallower than the
+    /// perturbation switch-over) the center stays an exact f64, so shallow
+    /// work behaves and saves exactly as it did before deep zoom.
+    fn move_center(&mut self, delta: Complex64, pixel_scale: f64) {
+        let c = self.center.to_c64();
+        self.center = if pixel_scale >= SWITCH * min_pixel_scale(c) {
+            HiComplex::from_c64(c + delta)
+        } else {
+            self.center.add_c64(delta, bits_for(pixel_scale))
+        };
     }
 
     /// Same region of the plane at a different pixel size.
@@ -311,5 +322,22 @@ mod tests {
     fn max_iter_resolve() {
         assert_eq!(MaxIter::Fixed(500).resolve(1e9), 500);
         assert_eq!(MaxIter::Auto.resolve(1e4), 700);
+    }
+
+    #[test]
+    fn shallow_zoom_and_pan_stay_f64_exact() {
+        let mut v = Viewport::default_for(800, 600);
+        v.zoom_about(123.0, 77.0, 1.2, DEEP_PIXEL_FLOOR);
+        v.pan_pixels(3.0, -5.0);
+        let json = serde_json::to_string(&v.center).unwrap();
+        assert!(json.starts_with('['), "{json}");
+        for _ in 0..40 {
+            v.zoom_about(100.0, 100.0, 10.0, DEEP_PIXEL_FLOOR);
+        }
+        for _ in 0..40 {
+            v.zoom_about(100.0, 100.0, 0.1, DEEP_PIXEL_FLOOR);
+        }
+        let json = serde_json::to_string(&v.center).unwrap();
+        assert!(json.starts_with('['), "back out: {json}");
     }
 }

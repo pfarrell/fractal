@@ -18,7 +18,7 @@ use crate::engine::movie::{RotatedSampler, rotated_offset};
 use crate::engine::render::{F64Sampler, Sampler};
 use crate::engine::viewport::{Viewport, min_pixel_scale};
 use num_complex::Complex64;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Perturbation takes over this far (in pixel spacing) before f64 runs
 /// out. f64's own rounding already misplaces a few percent of boundary
@@ -32,8 +32,9 @@ pub fn uses_perturbation(kind: &FractalKind, view: &Viewport) -> bool {
         && view.pixel_scale() < SWITCH * min_pixel_scale(view.center.to_c64())
 }
 
-/// The reference orbit Z₀ = 0, Z₁, …, Z_k as f64: Z_k is the last value
-/// inside the bailout, or k = max_iter.
+/// The reference orbit Z₀ = 0, Z₁, …, Z_k as f64: Z_k is the first value
+/// past the bailout (kept so even a centre that escapes at once leaves a
+/// step to perturb from), or k = max_iter.
 #[derive(Clone, Debug)]
 pub struct ReferenceOrbit {
     pub z: Arc<[Complex64]>,
@@ -48,11 +49,11 @@ impl ReferenceOrbit {
         for _ in 0..max_iter {
             z = z.mul(&z).add(&c);
             let zf = z.to_c64();
+            path.push(zf);
             // NaN (overflowed) counts as escaped too.
             if zf.norm_sqr() > BAILOUT * BAILOUT || zf.norm_sqr().is_nan() {
                 break;
             }
-            path.push(zf);
         }
         ReferenceOrbit { z: path.into() }
     }
@@ -60,9 +61,14 @@ impl ReferenceOrbit {
 
 /// Mandelbrot samples by perturbation about the centre of the view it
 /// was built for; it must only be used with views of that centre and span.
-#[derive(Clone, Debug)]
+///
+/// The reference orbit is computed on first use, so building a sampler is
+/// cheap on the UI thread and the work lands on the render worker.
+#[derive(Debug)]
 pub struct PerturbSampler {
-    orbit: ReferenceOrbit,
+    center: HiComplex,
+    bits: usize,
+    orbit: OnceLock<ReferenceOrbit>,
     max_iter: u32,
     angle: f64,
     span: f64,
@@ -72,21 +78,28 @@ impl PerturbSampler {
     /// Reference at `view`'s centre; the picture turned by `angle`.
     pub fn new(view: &Viewport, max_iter: u32, angle: f64) -> Self {
         PerturbSampler {
-            orbit: ReferenceOrbit::compute(&view.center, max_iter, bits_for(view.pixel_scale())),
+            center: view.center.clone(),
+            bits: bits_for(view.pixel_scale()),
+            orbit: OnceLock::new(),
             max_iter,
             angle,
             span: view.span,
         }
     }
 
+    fn orbit(&self) -> &ReferenceOrbit {
+        self.orbit
+            .get_or_init(|| ReferenceOrbit::compute(&self.center, self.max_iter, self.bits))
+    }
+
     /// How many reference values there are (Z₀ included).
     pub fn reference_len(&self) -> usize {
-        self.orbit.z.len()
+        self.orbit().z.len()
     }
 
     /// One pixel, `dc` away from the reference point.
     fn iterate(&self, dc: Complex64) -> Sample {
-        let zs = &self.orbit.z;
+        let zs = &self.orbit().z;
         let last = zs.len() - 1;
         let bail = BAILOUT * BAILOUT;
         let mut d = Complex64::new(0.0, 0.0);

@@ -90,3 +90,15 @@ fn serde_reads_old_array() {
     let z: HiComplex = serde_json::from_str("[-0.743643887,0.131825904]").unwrap();
     assert_eq!(z, HiComplex::from_c64(c(-0.743643887, 0.131825904)));
 }
+
+#[test]
+fn to_c64_is_cheap() {
+    let (_, b) = deep();
+    let t = std::time::Instant::now();
+    let mut acc = 0.0;
+    for _ in 0..1_000_000 {
+        acc += std::hint::black_box(&b).to_c64().re;
+    }
+    assert!(acc.is_finite());
+    assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());
+}
