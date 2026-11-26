@@ -102,7 +102,7 @@ pub fn explore_panel(
         MaxIter::Fixed(n) => {
             ch.render |= crate::ui::slider(
                 ui,
-                egui::Slider::new(n, 50..=20_000)
+                egui::Slider::new(n, 50..=1_000_000)
                     .logarithmic(true)
                     .text("max"),
             )

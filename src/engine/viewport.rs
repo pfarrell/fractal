@@ -48,7 +48,7 @@ pub fn pixel_floor(kind: &FractalKind, center: &HiComplex) -> f64 {
 /// iterations to resolve the boundary.
 pub fn auto_max_iter(magnification: f64) -> u32 {
     let n = 100.0 + 150.0 * magnification.log10().max(0.0);
-    n.clamp(100.0, 20_000.0) as u32
+    n.clamp(100.0, 50_000.0) as u32
 }
 
 /// How the maximum iteration count is chosen.
@@ -304,7 +304,7 @@ mod tests {
     fn auto_iter_values() {
         assert_eq!(auto_max_iter(1.0), 100);
         assert_eq!(auto_max_iter(1e4), 700);
-        assert_eq!(auto_max_iter(1e300), 20_000);
+        assert_eq!(auto_max_iter(1e300), 45_100);
     }
 
     #[test]

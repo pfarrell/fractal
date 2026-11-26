@@ -4,7 +4,7 @@ use crate::engine::bookmark::BookmarkView;
 use crate::engine::color::{ColorSettings, colorize};
 use crate::engine::escape::{FractalKind, Sample, iterate, orbit};
 use crate::engine::jobs::{RenderRequest, RenderSlot};
-use crate::engine::render::F64Sampler;
+use crate::engine::perturb::sampler_for;
 use crate::engine::viewport::{MaxIter, Viewport, pixel_floor};
 use crate::ui::bookmarks::BookmarksUi;
 use crate::ui::ifs_table::IfsState;
@@ -183,10 +183,7 @@ impl FractalApp {
         }
         let max_iter = s.max_iter.resolve(s.view.magnification());
         self.main_slot.submit(RenderRequest {
-            sampler: Arc::new(F64Sampler {
-                kind: s.kind,
-                max_iter,
-            }),
+            sampler: sampler_for(&s.kind, &s.view, max_iter, 0.0),
             view: s.view.clone(),
             progressive: true,
         });
