@@ -27,6 +27,7 @@ use crate::engine::keyframe::{
     Block, KEYFRAME_MAX_PIXELS, Quality, frame_work, keyframe_work, plan_range, planned_work,
     render_keyframe, resample,
 };
+use crate::engine::perturb::sampler_for;
 use crate::engine::render::{CancelToken, Sampler, render};
 use crate::engine::route::{JOINT_HALF_WIDTH_S, Route, Stop, step_length};
 use crate::engine::soundtrack::{add_music, plan_soundtrack, probe_track};
@@ -399,13 +400,16 @@ impl MovieSpec {
         self.route().angle_at(self.frame_time(i))
     }
 
-    /// Frame `i`'s four corners in the complex plane, turned with the
-    /// frame: top-left, top-right, bottom-right, bottom-left.
-    pub fn frame_corners(&self, i: usize) -> [Complex64; 4] {
+    /// Frame `i`'s four corners, turned with the frame, as offsets from
+    /// `origin` (so they keep their precision at any depth): top-left,
+    /// top-right, bottom-right, bottom-left.
+    pub fn frame_corner_offsets(&self, i: usize, origin: &HiComplex) -> [Complex64; 4] {
         let view = self.frame_view(i);
         let angle = self.frame_angle(i);
+        let shift = view.center.diff_c64(origin);
         let (w, h) = (view.width as f64, view.height as f64);
-        [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| rotated_point(&view, angle, x, y))
+        [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
+            .map(|(x, y)| shift + rotated_offset(&view, angle, x, y))
     }
 }
 
@@ -640,13 +644,10 @@ pub fn render_exact_frame(
     out: &mut [[u8; 4]],
 ) -> Result<(), MovieError> {
     let view = spec.frame_view(i);
-    let sampler = RotatedSampler {
-        kind: spec.kind,
-        max_iter: spec.max_iter.resolve(view.magnification()),
-        angle: spec.frame_angle(i),
-    };
-    let samples =
-        render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled { kept: None })?;
+    let max_iter = spec.max_iter.resolve(view.magnification());
+    let sampler = sampler_for(&spec.kind, &view, max_iter, spec.frame_angle(i));
+    let samples = render(sampler.as_ref(), &view, pool, cancel)
+        .ok_or(MovieError::Cancelled { kept: None })?;
     colorize(&samples, &spec.color, out);
     Ok(())
 }

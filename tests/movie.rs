@@ -1359,3 +1359,96 @@ fn old_spec_json_loads() {
         fractal_explorer::engine::deep::HiComplex::from_c64(Complex64::new(-0.75, 0.1))
     );
 }
+
+fn movie_pool() -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new().build().unwrap()
+}
+
+/// Fraction of escape samples that agree within ±1 iteration.
+fn sample_agreement(
+    a: &[fractal_explorer::engine::escape::Sample],
+    b: &[fractal_explorer::engine::escape::Sample],
+) -> f64 {
+    use fractal_explorer::engine::escape::Sample::Escaped;
+    let ok = a
+        .iter()
+        .zip(b)
+        .filter(|(x, y)| match (x, y) {
+            (Escaped { iter: p, .. }, Escaped { iter: q, .. }) => p.abs_diff(*q) <= 1,
+            (Escaped { .. }, _) | (_, Escaped { .. }) => false,
+            _ => true,
+        })
+        .count();
+    ok as f64 / a.len() as f64
+}
+
+#[test]
+fn switch_over_has_no_jump() {
+    use fractal_explorer::engine::perturb::{PerturbSampler, uses_perturbation};
+    use fractal_explorer::engine::render::render_serial;
+    let mut sp = s();
+    sp.stops[0].center = Complex64::new(-0.743643887, 0.131825904).into();
+    sp.stops[0].span = 3e-6;
+    sp.stops[1].span = 3e-12;
+    sp.seconds = 40.0 / 30.0;
+    sp.fps = 30;
+    let flip = (0..sp.frame_count())
+        .find(|&i| uses_perturbation(&sp.kind, &sp.frame_view(i)))
+        .expect("route crosses the switch-over");
+    assert!(flip > 0);
+    for i in [flip - 1, flip] {
+        let v = sp.frame_view(i);
+        let max_iter = sp.max_iter.resolve(v.magnification());
+        let f = render_serial(
+            &F64Sampler {
+                kind: sp.kind,
+                max_iter,
+            },
+            &v,
+        );
+        let p = render_serial(&PerturbSampler::new(&v, max_iter, 0.0), &v);
+        let a = sample_agreement(&f, &p);
+        assert!(a >= 0.99, "frame {i}: {a}");
+    }
+}
+
+#[test]
+fn deep_exact_frame_matches_keyframe_frame() {
+    let mut sp = s();
+    sp.stops[1].center = Complex64::new(0.0, 1.0).into();
+    sp.stops[1].span = 3e-40;
+    sp.width = 48;
+    sp.height = 32;
+    sp.seconds = 1.0;
+    let last = sp.frame_count() - 1;
+    let pool = movie_pool();
+    let mut exact = vec![[0u8; 4]; 48 * 32];
+    render_exact_frame(&sp, last, &pool, &CancelToken::never(), &mut exact).unwrap();
+    sp.quality = Quality::Fast;
+    let mut fast = Vec::new();
+    render_range(
+        &sp,
+        last..last + 1,
+        &pool,
+        &CancelToken::never(),
+        &mut |_, px| {
+            fast = px.to_vec();
+            true
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(fast.len(), exact.len());
+    let distinct: std::collections::HashSet<_> = exact.iter().collect();
+    assert!(distinct.len() > 5, "plain frame");
+    let off = exact
+        .iter()
+        .zip(&fast)
+        .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 8))
+        .count();
+    assert!(
+        off * 20 < exact.len(),
+        "{off} of {} pixels differ",
+        exact.len()
+    );
+}

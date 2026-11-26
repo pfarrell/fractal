@@ -2,12 +2,14 @@
 //! one large keyframe whose samples are packed into 4 bytes so a movie
 //! frame can be colored with its own iteration cutoff.
 use crate::engine::color::{ColorSettings, Palette, sample_color};
+use crate::engine::deep::{HiComplex, bits_for};
 use crate::engine::escape::{FractalKind, Sample};
 use crate::engine::movie::MovieSpec;
 #[cfg(doc)]
 use crate::engine::movie::rotated_point;
-use crate::engine::render::{CancelToken, F64Sampler, Sampler, render};
-use crate::engine::viewport::{Viewport, min_pixel_scale};
+use crate::engine::perturb::sampler_for;
+use crate::engine::render::{CancelToken, Sampler, render};
+use crate::engine::viewport::{Viewport, pixel_floor};
 use num_complex::Complex64;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -76,9 +78,11 @@ pub enum Block {
     Exact(Range<usize>),
 }
 
-/// What the frames of a growing stretch cover.
-#[derive(Clone, Copy)]
+/// What the frames of a growing stretch cover, as offsets from `origin`
+/// (the first frame's centre) so the box keeps its size at any depth.
+#[derive(Clone)]
 struct Bounds {
+    origin: HiComplex,
     lo: Complex64,
     hi: Complex64,
     min_span: f64,
@@ -89,8 +93,10 @@ struct Bounds {
 
 impl Bounds {
     fn of(spec: &MovieSpec, i: usize) -> Bounds {
-        let span = spec.frame_view(i).span;
+        let view = spec.frame_view(i);
+        let span = view.span;
         let empty = Bounds {
+            origin: view.center,
             lo: Complex64::new(f64::INFINITY, f64::INFINITY),
             hi: Complex64::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
             min_span: span,
@@ -101,7 +107,7 @@ impl Bounds {
     }
 
     fn with(mut self, spec: &MovieSpec, i: usize) -> Bounds {
-        for c in spec.frame_corners(i) {
+        for c in spec.frame_corner_offsets(i, &self.origin) {
             self.lo = Complex64::new(self.lo.re.min(c.re), self.lo.im.min(c.im));
             self.hi = Complex64::new(self.hi.re.max(c.re), self.hi.im.max(c.im));
         }
@@ -115,10 +121,12 @@ impl Bounds {
     }
 
     /// The keyframe covering these frames, `q` samples per deepest-frame
-    /// pixel but no finer than f64 can resolve.
-    fn keyframe(&self, frame_height: usize, q: u32) -> Viewport {
-        let center = (self.lo + self.hi) / 2.0;
-        let spacing = (self.min_span / frame_height as f64 / q as f64).max(min_pixel_scale(center));
+    /// pixel but no finer than `kind` can resolve (see [`pixel_floor`]).
+    fn keyframe(&self, kind: &FractalKind, frame_height: usize, q: u32) -> Viewport {
+        let wanted = self.min_span / frame_height as f64 / q as f64;
+        let mid = (self.lo + self.hi) / 2.0;
+        let center = self.origin.add_c64(mid, bits_for(wanted));
+        let spacing = wanted.max(pixel_floor(kind, &center));
         let size = self.hi - self.lo;
         let cells = |extent: f64| (extent / spacing + 2.0 * MARGIN_PIXELS).ceil() as usize;
         let (width, height) = (cells(size.re), cells(size.im));
@@ -148,7 +156,7 @@ pub fn plan_range(spec: &MovieSpec, frames: Range<usize>, q: u32, max_pixels: us
         let mut bounds = Bounds::of(spec, i);
         let Some(q) = [q, 1]
             .into_iter()
-            .find(|&q| fits(&bounds.keyframe(h, q), max_pixels))
+            .find(|&q| fits(&bounds.keyframe(&spec.kind, h, q), max_pixels))
         else {
             match blocks.last_mut() {
                 Some(Block::Exact(r)) => r.end = i + 1,
@@ -159,9 +167,9 @@ pub fn plan_range(spec: &MovieSpec, frames: Range<usize>, q: u32, max_pixels: us
         };
         let mut end = i + 1;
         while end < n {
-            let grown = bounds.with(spec, end);
+            let grown = bounds.clone().with(spec, end);
             if grown.max_span / grown.min_span > MAX_SPAN_RATIO
-                || !fits(&grown.keyframe(h, q), max_pixels)
+                || !fits(&grown.keyframe(&spec.kind, h, q), max_pixels)
             {
                 break;
             }
@@ -171,7 +179,7 @@ pub fn plan_range(spec: &MovieSpec, frames: Range<usize>, q: u32, max_pixels: us
         let magnification = spec.frame_view(bounds.deepest).magnification();
         blocks.push(Block::Keyframe(Stretch {
             frames: i..end,
-            view: bounds.keyframe(h, q),
+            view: bounds.keyframe(&spec.kind, h, q),
             q,
             max_iter: spec.max_iter.resolve(magnification),
         }));
@@ -380,7 +388,7 @@ pub struct Keyframe {
 /// Samples a band of a keyframe at the keyframe's own pixel coordinates,
 /// so a banded render is bit-for-bit the plain render of the whole view.
 struct BandSampler<'a> {
-    inner: F64Sampler,
+    inner: &'a dyn Sampler,
     keyframe: &'a Viewport,
     row0: usize,
 }
@@ -401,10 +409,8 @@ pub fn render_keyframe(
 ) -> Option<Keyframe> {
     let view = s.view.clone();
     let (w, h, scale) = (view.width, view.height, view.pixel_scale());
-    let inner = F64Sampler {
-        kind,
-        max_iter: s.max_iter,
-    };
+    let sampler = sampler_for(&kind, &view, s.max_iter, 0.0);
+    let inner = sampler.as_ref();
     let mut data = Vec::with_capacity(w * h);
     let band_rows = keyframe_band_rows(w);
     for row0 in (0..h).step_by(band_rows) {

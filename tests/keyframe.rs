@@ -143,14 +143,13 @@ fn every_frame_lies_inside_its_keyframe() {
         for (name, spec) in specs(Quality::Smooth) {
             for s in stretches(&plan(&spec, q, KEYFRAME_MAX_PIXELS)) {
                 let v = &s.view;
-                let vc = v.center.to_c64();
                 let k = v.pixel_scale();
                 let half_w = v.width as f64 * k / 2.0;
                 let half_h = v.height as f64 * k / 2.0;
-                let (left, right) = (vc.re - half_w + k, vc.re + half_w - k);
-                let (bottom, top) = (vc.im - half_h + k, vc.im + half_h - k);
+                let (left, right) = (-half_w + k, half_w - k);
+                let (bottom, top) = (-half_h + k, half_h - k);
                 for i in s.frames.clone() {
-                    for c in spec.frame_corners(i) {
+                    for c in spec.frame_corner_offsets(i, &v.center) {
                         assert!(
                             (left..=right).contains(&c.re) && (bottom..=top).contains(&c.im),
                             "{name} q={q}: frame {i} corner {c} outside keyframe {v:?}"
@@ -171,7 +170,7 @@ fn frame_corners_follow_rotation() {
     };
     let last = spec.frame_count() - 1;
     let v = spec.frame_view(last);
-    let [tl, tr, br, bl] = spec.frame_corners(last);
+    let [tl, tr, br, bl] = spec.frame_corner_offsets(last, &v.center);
     // A quarter turn counterclockwise: the top-left corner swings to
     // bottom-left, so it sits below and left of the center.
     let (hw, hh) = (
@@ -179,7 +178,7 @@ fn frame_corners_follow_rotation() {
         v.span / 2.0,
     );
     let near = |a: Complex64, b: Complex64| (a - b).norm() < 1e-9;
-    let vc = v.center.to_c64();
+    let vc = Complex64::new(0.0, 0.0);
     assert!(near(tl, vc + Complex64::new(-hh, -hw)), "{tl}");
     assert!(near(tr, vc + Complex64::new(-hh, hw)), "{tr}");
     assert!(near(br, vc + Complex64::new(hh, hw)), "{br}");
@@ -229,6 +228,8 @@ fn density_clamped_at_precision_floor() {
             min_pixel_scale(TARGET) * 90.0,
             0.0,
         ),
+        // An f64-only kind: Mandelbrot keyframes go deeper by perturbation.
+        kind: FractalKind::BurningShip,
         ..base(Quality::Smooth)
     };
     let blocks = plan(&spec, 2, KEYFRAME_MAX_PIXELS);
@@ -623,11 +624,11 @@ fn plan_range_covers_exactly_the_range() {
         assert_eq!(covered, (40..95).collect::<Vec<_>>(), "{name}");
         for st in stretches(&blocks) {
             let (lo, hi) = (
-                st.view.pixel_to_complex(0.0, st.view.height as f64),
-                st.view.pixel_to_complex(st.view.width as f64, 0.0),
+                st.view.pixel_offset(0.0, st.view.height as f64),
+                st.view.pixel_offset(st.view.width as f64, 0.0),
             );
             for i in st.frames.clone() {
-                for c in s.frame_corners(i) {
+                for c in s.frame_corner_offsets(i, &st.view.center) {
                     assert!(
                         c.re >= lo.re.min(hi.re)
                             && c.re <= lo.re.max(hi.re)
@@ -645,4 +646,40 @@ fn plan_range_covers_exactly_the_range() {
 fn plan_range_of_empty_range_is_empty() {
     let s = base(Quality::Smooth);
     assert!(plan_range(&s, 7..7, 2, KEYFRAME_MAX_PIXELS).is_empty());
+}
+
+#[test]
+fn deep_stretch_bounds_cover_frames() {
+    use fractal_explorer::engine::deep::{HiComplex, bits_for};
+    let c = HiComplex::from_c64(Complex64::new(0.0, 1.0));
+    let end = c.add_c64(Complex64::new(2e-41, -1e-41), bits_for(1e-45));
+    let mut spec = MovieSpec {
+        seconds: 2.0,
+        ..base(Quality::Fast)
+    };
+    spec.stops = two(
+        Complex64::new(0.0, 1.0),
+        3e-40,
+        Complex64::new(0.0, 1.0),
+        3e-41,
+        30.0,
+    );
+    spec.stops[0].center = c;
+    spec.stops[1].center = end;
+    let blocks = plan(&spec, 1, KEYFRAME_MAX_PIXELS);
+    assert!(stretches(&blocks).next().is_some());
+    for s in stretches(&blocks) {
+        let v = &s.view;
+        assert!(v.width > 4 && v.height > 4, "degenerate keyframe {v:?}");
+        let k = v.pixel_scale();
+        let (half_w, half_h) = (v.width as f64 * k / 2.0, v.height as f64 * k / 2.0);
+        for i in s.frames.clone() {
+            for d in spec.frame_corner_offsets(i, &v.center) {
+                assert!(
+                    d.re.abs() <= half_w && d.im.abs() <= half_h,
+                    "frame {i} corner {d} outside keyframe {half_w:e}×{half_h:e}"
+                );
+            }
+        }
+    }
 }
