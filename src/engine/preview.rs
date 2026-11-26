@@ -6,7 +6,6 @@ use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::Quality;
 use crate::engine::movie::{MovieError, MovieProgress, MovieSpec, render_range};
 use crate::engine::render::CancelToken;
-use num_complex::Complex64;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -67,9 +66,9 @@ pub fn frame_at_time(spec: &MovieSpec, t: f64) -> usize {
 
 /// Everything a frame's picture depends on. Equal fingerprints render the
 /// same picture.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fingerprint {
-    center: Complex64,
+    center: crate::engine::deep::HiComplex,
     span: f64,
     angle: f64,
     max_iter: u32,
@@ -81,7 +80,7 @@ pub struct Fingerprint {
 pub fn fingerprint(spec: &MovieSpec, i: usize) -> Fingerprint {
     let view = spec.frame_view(i);
     Fingerprint {
-        center: view.center,
+        center: view.center.clone(),
         span: view.span,
         angle: spec.frame_angle(i),
         max_iter: spec.max_iter.resolve(view.magnification()),

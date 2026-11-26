@@ -23,13 +23,13 @@ fn spec(out: PathBuf) -> MovieSpec {
         kind: FractalKind::Mandelbrot,
         stops: vec![
             Stop {
-                center: Complex64::new(-0.5, 0.0),
+                center: Complex64::new(-0.5, 0.0).into(),
                 span: 3.0,
                 rotation: 0.0,
                 rotation_unit: RotationUnit::PerSecond,
             },
             Stop {
-                center: Complex64::new(-0.743643887, 0.131825904),
+                center: Complex64::new(-0.743643887, 0.131825904).into(),
                 span: 3.0e-6,
                 rotation: 0.0,
                 rotation_unit: RotationUnit::PerSecond,
@@ -90,7 +90,7 @@ fn pixels_apart(
 fn last_frame_is_centered_on_target() {
     let sp = s();
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert!(pixels_apart(&last, last.center, sp.stops[1].center) < 0.01);
+    assert!(pixels_apart(&last, last.center.to_c64(), sp.stops[1].center.to_c64()) < 0.01);
 }
 
 #[test]
@@ -144,11 +144,11 @@ fn validate_rejects_non_finite_rotation() {
 fn off_center_bookmark_end_view_is_hit_exactly() {
     // End view far from the start view's center, as with a bookmark.
     let mut sp = s();
-    sp.stops[0].center = Complex64::new(0.0, 0.0);
-    sp.stops[1].center = Complex64::new(-1.25, 0.4);
+    sp.stops[0].center = Complex64::new(0.0, 0.0).into();
+    sp.stops[1].center = Complex64::new(-1.25, 0.4).into();
     sp.stops[1].span = 1e-9;
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert!(pixels_apart(&last, last.center, sp.stops[1].center) < 0.01);
+    assert!(pixels_apart(&last, last.center.to_c64(), sp.stops[1].center.to_c64()) < 0.01);
     assert!((last.span - 1e-9).abs() < 1e-21);
 }
 
@@ -157,11 +157,11 @@ fn zoom_follows_one_straight_zoom_line() {
     // Every frame is the start view scaled about one fixed point, so that
     // point sits on the same pixel in every frame.
     let mut sp = s();
-    sp.stops[0].center = Complex64::new(0.0, 0.0);
-    sp.stops[1].center = Complex64::new(-1.25, 0.4);
+    sp.stops[0].center = Complex64::new(0.0, 0.0).into();
+    sp.stops[1].center = Complex64::new(-1.25, 0.4).into();
     sp.stops[1].span = 1e-3;
     let r = sp.stops[1].span / sp.stops[0].span;
-    let fixed = (sp.stops[1].center - sp.stops[0].center * r) / (1.0 - r);
+    let fixed = (sp.stops[1].center.to_c64() - sp.stops[0].center.to_c64() * r) / (1.0 - r);
     let first = sp.frame_view(0).complex_to_pixel(fixed);
     for i in 1..sp.frame_count() {
         let (x, y) = sp.frame_view(i).complex_to_pixel(fixed);
@@ -179,8 +179,8 @@ fn equal_spans_pan_straight_to_target() {
     let n = sp.frame_count();
     let mid = sp.frame_view((n - 1) / 2);
     let last = sp.frame_view(n - 1);
-    assert!(mid.center.re.is_finite() && mid.center.im.is_finite());
-    assert!((last.center - sp.stops[1].center).norm() < 1e-12);
+    assert!(mid.center.to_c64().re.is_finite() && mid.center.to_c64().im.is_finite());
+    assert!(last.center.diff_c64(&sp.stops[1].center).norm() < 1e-12);
     assert_eq!(last.span, sp.stops[0].span);
 }
 
@@ -194,7 +194,11 @@ fn validate_rejects_odd_size_and_bad_fps() {
     fps.fps = 0;
     assert!(matches!(fps.validate(), Err(MovieError::Invalid(_))));
     let mut deep = s();
+    deep.stops[1].span = 1e-301;
+    assert!(matches!(deep.validate(), Err(MovieError::Invalid(_))));
     deep.stops[1].span = 1e-20;
+    assert!(deep.validate().is_ok(), "{:?}", deep.validate());
+    deep.kind = FractalKind::BurningShip;
     assert!(matches!(deep.validate(), Err(MovieError::Invalid(_))));
 }
 
@@ -590,10 +594,12 @@ fn slider_max_end_zoom_is_accepted() {
         let mut sp = s();
         sp.height = 1080;
         sp.width = 1920;
-        sp.stops[1].center = Complex64::new(-2.0 + i as f64 * 0.000_7, 0.3 - i as f64 * 0.000_11);
-        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(sp.stops[1].center) * sp.height as f64);
+        sp.stops[1].center =
+            Complex64::new(-2.0 + i as f64 * 0.000_7, 0.3 - i as f64 * 0.000_11).into();
+        let floor_mag =
+            DEFAULT_SPAN / (min_pixel_scale(sp.stops[1].center.to_c64()) * sp.height as f64);
         sp.stops[1].span = DEFAULT_SPAN / floor_mag;
-        assert!(sp.validate().is_ok(), "target {}", sp.stops[1].center);
+        assert!(sp.validate().is_ok(), "target {:?}", sp.stops[1].center);
     }
 }
 
@@ -811,7 +817,7 @@ fn cancel_during_a_later_keyframe_keeps_the_earlier_stretch() {
 
 fn stop(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
     Stop {
-        center: Complex64::new(re, im),
+        center: Complex64::new(re, im).into(),
         span,
         rotation,
         rotation_unit: RotationUnit::PerSecond,
@@ -834,8 +840,14 @@ fn three_stop_spec_hits_first_and_last() {
     let sp = three_stops(PathBuf::from("/tmp/unused.mp4"));
     let first = sp.frame_view(0);
     let last = sp.frame_view(sp.frame_count() - 1);
-    assert_eq!((first.center, first.span), (sp.stops[0].center, 3.0));
-    assert_eq!((last.center, last.span), (sp.stops[2].center, 3e-5));
+    assert_eq!(
+        (first.center.to_c64(), first.span),
+        (sp.stops[0].center.to_c64(), 3.0)
+    );
+    assert_eq!(
+        (last.center.to_c64(), last.span),
+        (sp.stops[2].center.to_c64(), 3e-5)
+    );
 }
 
 #[test]
@@ -853,7 +865,7 @@ fn validate_rejects_single_stop() {
 fn validate_rejects_zero_length_step() {
     let dir = tempfile::tempdir().unwrap();
     let mut sp = spec(dir.path().join("o.mp4"));
-    let again = sp.stops[1];
+    let again = sp.stops[1].clone();
     sp.stops.push(again);
     match sp.validate() {
         Err(MovieError::Invalid(m)) => assert!(m.contains("same view"), "{m}"),
@@ -865,8 +877,10 @@ fn validate_rejects_zero_length_step() {
 fn validate_checks_every_stop_against_precision() {
     let dir = tempfile::tempdir().unwrap();
     let mut sp = three_stops(dir.path().join("o.mp4"));
-    let c1 = sp.stops[1].center;
-    sp.stops[1].span = min_pixel_scale(c1) * sp.height as f64 * 0.5;
+    // Mandelbrot goes far deeper (perturbation); test an f64-only kind.
+    sp.kind = FractalKind::BurningShip;
+    let c1 = sp.stops[1].center.clone();
+    sp.stops[1].span = min_pixel_scale(c1.to_c64()) * sp.height as f64 * 0.5;
     sp.stops[2] = stop(-0.75, 0.1001, 1e-3, 0.0);
     match sp.validate() {
         Err(MovieError::Invalid(m)) => assert!(m.contains("stop 2"), "{m}"),
@@ -906,12 +920,15 @@ fn spin_in_place_is_a_valid_movie() {
     let mut sp = spec(dir.path().join("o.mp4"));
     sp.stops[1] = Stop {
         rotation: 10.0,
-        ..sp.stops[0]
+        ..sp.stops[0].clone()
     };
     assert!(sp.validate().is_ok(), "{:?}", sp.validate());
     for i in [0, sp.frame_count() / 2, sp.frame_count() - 1] {
         let v = sp.frame_view(i);
-        assert_eq!((v.center, v.span), (sp.stops[0].center, sp.stops[0].span));
+        assert_eq!(
+            (v.center.to_c64(), v.span),
+            (sp.stops[0].center.to_c64(), sp.stops[0].span)
+        );
     }
     let last = sp.frame_angle(sp.frame_count() - 1);
     assert!((last - 100f64.to_radians()).abs() < 1e-9, "{last}");
@@ -1262,7 +1279,7 @@ fn clamp_depth_raises_too_deep_stops_to_the_floor() {
     let mut sp = s();
     sp.width = 1920;
     sp.height = 1080;
-    let floor = precision_floor(sp.stops[1].center, sp.height);
+    let floor = precision_floor(&sp.kind, &sp.stops[1].center, sp.height);
     sp.stops[1].span = floor / 2.0;
     assert!(sp.validate_frames().is_err());
     assert_eq!(sp.clamp_depth(), vec![1]);
@@ -1276,4 +1293,162 @@ fn clamp_depth_leaves_resolvable_stops() {
     let before = sp.stops.clone();
     assert!(sp.clamp_depth().is_empty());
     assert_eq!(sp.stops, before);
+}
+
+fn deep_end() -> fractal_explorer::engine::deep::HiComplex {
+    use fractal_explorer::engine::deep::{HiComplex, bits_for};
+    HiComplex::from_c64(Complex64::new(-0.743643887, 0.131825904))
+        .add_c64(Complex64::new(3e-45, -1e-45), bits_for(1e-60))
+}
+
+#[test]
+fn zoom_line_holds_at_depth() {
+    use fractal_explorer::engine::deep::{HiComplex, bits_for};
+    let mut sp = s();
+    sp.stops[1].center = deep_end();
+    sp.stops[1].span = 3e-50;
+    sp.seconds = 2.0;
+    let (c0, c1) = (sp.stops[0].center.clone(), sp.stops[1].center.clone());
+    let r = 1e-50;
+    // Q = (c₁ − c₀·r)/(1 − r) = c₁ + (c₁ − c₀)·r/(1 − r).
+    let q = c1
+        .with_bits(bits_for(1e-60))
+        .add(&c1.sub(&c0).mul_f64(r / (1.0 - r)));
+    let dir0 = c0.diff_c64(&q);
+    let n = sp.frame_count();
+    for i in 0..n {
+        let v = sp.frame_view(i);
+        let d = v.center.diff_c64(&q);
+        let cross = d.re * dir0.im - d.im * dir0.re;
+        assert!(
+            cross.abs() <= 1e-6 * d.norm() * dir0.norm() + 1e-300,
+            "frame {i} off the zoom line"
+        );
+    }
+    let last = sp.frame_view(n - 1);
+    assert!(last.center.diff_c64(&c1).norm() < 1e-3 * 3e-50);
+    let _ = HiComplex::from_c64(Complex64::new(0.0, 0.0));
+}
+
+#[test]
+fn clamp_depth_per_kind() {
+    let mut sp = s();
+    sp.height = 1080;
+    sp.width = 1920;
+    sp.stops[1].span = 1e-50;
+    assert!(sp.clamp_depth().is_empty());
+    assert_eq!(sp.stops[1].span, 1e-50);
+    sp.kind = FractalKind::Julia {
+        c: Complex64::new(-0.8, 0.156),
+    };
+    sp.stops[1].span = 1e-14;
+    assert_eq!(sp.clamp_depth(), vec![1]);
+    assert_eq!(
+        sp.stops[1].span,
+        precision_floor(&sp.kind, &sp.stops[1].center, 1080)
+    );
+}
+
+#[test]
+fn old_spec_json_loads() {
+    let mut j = serde_json::to_value(s()).unwrap();
+    j["stops"][1]["center"] = serde_json::json!([-0.75, 0.1]);
+    let back: MovieSpec = serde_json::from_value(j).unwrap();
+    assert_eq!(
+        back.stops[1].center,
+        fractal_explorer::engine::deep::HiComplex::from_c64(Complex64::new(-0.75, 0.1))
+    );
+}
+
+fn movie_pool() -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new().build().unwrap()
+}
+
+/// Fraction of escape samples that agree within ±1 iteration.
+fn sample_agreement(
+    a: &[fractal_explorer::engine::escape::Sample],
+    b: &[fractal_explorer::engine::escape::Sample],
+) -> f64 {
+    use fractal_explorer::engine::escape::Sample::Escaped;
+    let ok = a
+        .iter()
+        .zip(b)
+        .filter(|(x, y)| match (x, y) {
+            (Escaped { iter: p, .. }, Escaped { iter: q, .. }) => p.abs_diff(*q) <= 1,
+            (Escaped { .. }, _) | (_, Escaped { .. }) => false,
+            _ => true,
+        })
+        .count();
+    ok as f64 / a.len() as f64
+}
+
+#[test]
+fn switch_over_has_no_jump() {
+    use fractal_explorer::engine::perturb::{PerturbSampler, uses_perturbation};
+    use fractal_explorer::engine::render::render_serial;
+    let mut sp = s();
+    sp.stops[0].center = Complex64::new(-0.743643887, 0.131825904).into();
+    sp.stops[0].span = 3e-6;
+    sp.stops[1].span = 3e-12;
+    sp.seconds = 40.0 / 30.0;
+    sp.fps = 30;
+    let flip = (0..sp.frame_count())
+        .find(|&i| uses_perturbation(&sp.kind, &sp.frame_view(i)))
+        .expect("route crosses the switch-over");
+    assert!(flip > 0);
+    for i in [flip - 1, flip] {
+        let v = sp.frame_view(i);
+        let max_iter = sp.max_iter.resolve(v.magnification());
+        let f = render_serial(
+            &F64Sampler {
+                kind: sp.kind,
+                max_iter,
+            },
+            &v,
+        );
+        let p = render_serial(&PerturbSampler::new(&v, max_iter, 0.0), &v);
+        let a = sample_agreement(&f, &p);
+        assert!(a >= 0.99, "frame {i}: {a}");
+    }
+}
+
+#[test]
+fn deep_exact_frame_matches_keyframe_frame() {
+    let mut sp = s();
+    sp.stops[1].center = Complex64::new(0.0, 1.0).into();
+    sp.stops[1].span = 3e-40;
+    sp.width = 48;
+    sp.height = 32;
+    sp.seconds = 1.0;
+    let last = sp.frame_count() - 1;
+    let pool = movie_pool();
+    let mut exact = vec![[0u8; 4]; 48 * 32];
+    render_exact_frame(&sp, last, &pool, &CancelToken::never(), &mut exact).unwrap();
+    sp.quality = Quality::Fast;
+    let mut fast = Vec::new();
+    render_range(
+        &sp,
+        last..last + 1,
+        &pool,
+        &CancelToken::never(),
+        &mut |_, px| {
+            fast = px.to_vec();
+            true
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(fast.len(), exact.len());
+    let distinct: std::collections::HashSet<_> = exact.iter().collect();
+    assert!(distinct.len() > 5, "plain frame");
+    let off = exact
+        .iter()
+        .zip(&fast)
+        .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 8))
+        .count();
+    assert!(
+        off * 20 < exact.len(),
+        "{off} of {} pixels differ",
+        exact.len()
+    );
 }

@@ -19,7 +19,7 @@ use std::sync::mpsc::channel;
 
 fn st(re: f64, im: f64, span: f64, rotation: f64) -> Stop {
     Stop {
-        center: Complex64::new(re, im),
+        center: Complex64::new(re, im).into(),
         span,
         rotation,
         rotation_unit: RotationUnit::PerSecond,

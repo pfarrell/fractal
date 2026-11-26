@@ -2,9 +2,10 @@
 //! outlines drawn over the picture.
 
 use crate::engine::color::{ColorSettings, colorize_density};
+use crate::engine::deep::HiComplex;
 use crate::engine::ifs::{AffineMap, Density, IfsSystem, chaos_game};
 use crate::engine::jobs::JobSlot;
-use crate::engine::viewport::Viewport;
+use crate::engine::viewport::{Viewport, min_pixel_scale};
 use crate::ui::app::upload;
 use crate::ui::notes::{NOTE_IFS, note};
 use crate::ui::view::{ScreenMapping, show_view};
@@ -103,11 +104,11 @@ impl IfsState {
         let view = Viewport::default_for(0, 0);
         Self {
             system: IfsSystem::barnsley_fern(),
-            view,
+            view: view.clone(),
             points: 5_000_000,
             show_outlines: true,
             density: None,
-            density_view: view,
+            density_view: view.clone(),
             last_time: None,
             slot: JobSlot::new(threads, Arc::new(move || ctx.request_repaint())),
             texture: None,
@@ -196,7 +197,7 @@ impl IfsState {
     }
 
     /// Set the view's center and span (e.g. from a bookmark).
-    pub fn set_view(&mut self, center: Complex64, span: f64) {
+    pub fn set_view(&mut self, center: HiComplex, span: f64) {
         self.view.center = center;
         self.view.span = span;
         self.placed = true;
@@ -232,7 +233,8 @@ impl IfsState {
         }
 
         let image = self.texture.as_ref().map(|t| (t, &self.density_view));
-        let resp = show_view(ui, image, &mut self.view);
+        let floor = min_pixel_scale(self.view.center.to_c64());
+        let resp = show_view(ui, image, &mut self.view, floor);
         let (w, h) = resp.mapping.pixel_size();
         self.resize(w, h);
         self.needs_render |= resp.view_changed;
@@ -241,7 +243,7 @@ impl IfsState {
         }
 
         if self.needs_render && !self.view.is_empty() {
-            let (sys, view, points) = (self.system.clone(), self.view, self.points);
+            let (sys, view, points) = (self.system.clone(), self.view.clone(), self.points);
             self.slot.run(move |pool, token, emit| {
                 let start = Instant::now();
                 if let Some(density) = chaos_game(&sys, &view, points, SEED, pool, token) {
@@ -328,16 +330,16 @@ mod tests {
     #[test]
     fn bookmarked_view_survives_first_sizing() {
         let mut s = IfsState::new(&egui::Context::default(), 1);
-        s.set_view(Complex64::new(0.1, 7.0), 0.5);
+        s.set_view(Complex64::new(0.1, 7.0).into(), 0.5);
         s.resize(800, 600);
         assert_eq!(
-            (s.view.center, s.view.span),
+            (s.view.center.to_c64(), s.view.span),
             (Complex64::new(0.1, 7.0), 0.5)
         );
         s.resize(0, 0); // minimized
         s.resize(800, 600); // restored
         assert_eq!(
-            (s.view.center, s.view.span),
+            (s.view.center.to_c64(), s.view.span),
             (Complex64::new(0.1, 7.0), 0.5)
         );
     }

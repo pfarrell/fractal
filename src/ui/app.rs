@@ -2,15 +2,17 @@
 
 use crate::engine::bookmark::BookmarkView;
 use crate::engine::color::{ColorSettings, colorize};
+use crate::engine::deep::HiComplex;
 use crate::engine::escape::{FractalKind, Sample, iterate, orbit};
 use crate::engine::jobs::{RenderRequest, RenderSlot};
-use crate::engine::render::F64Sampler;
-use crate::engine::viewport::{MaxIter, Viewport};
+use crate::engine::perturb::sampler_for;
+use crate::engine::viewport::{MaxIter, Viewport, pixel_floor};
 use crate::ui::bookmarks::BookmarksUi;
 use crate::ui::ifs_table::IfsState;
 use crate::ui::julia::{JuliaAction, JuliaPanel};
 use crate::ui::movie_dialog::{MovieDialog, MovieStart};
 use crate::ui::panel::{explore_panel, orbit_panel, palette_combo, threads_slider};
+use crate::ui::readout_digits;
 use crate::ui::view::{draw_orbit, show_view};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use num_complex::Complex64;
@@ -42,11 +44,11 @@ impl Default for ExploreState {
         let view = Viewport::default_for(0, 0);
         Self {
             kind: FractalKind::Mandelbrot,
-            view,
+            view: view.clone(),
             max_iter: MaxIter::Auto,
             color: ColorSettings::default(),
             samples: Vec::new(),
-            samples_view: view,
+            samples_view: view.clone(),
             last_render: None,
         }
     }
@@ -146,8 +148,10 @@ pub struct FractalApp {
     pixels: Vec<[u8; 4]>,
     needs_render: bool,
     cursor: Option<Complex64>,
+    /// The point under the cursor at full precision (escape-time view).
+    cursor_hi: Option<HiComplex>,
     /// Where the picture was last right-clicked (the context menu's point).
-    menu_point: Option<Complex64>,
+    menu_point: Option<HiComplex>,
     julia: JuliaPanel,
     orbit: Option<OrbitState>,
     ifs: IfsState,
@@ -167,6 +171,7 @@ impl FractalApp {
             pixels: Vec::new(),
             needs_render: true,
             cursor: None,
+            cursor_hi: None,
             menu_point: None,
             julia: JuliaPanel::new(&cc.egui_ctx, max_threads),
             orbit: None,
@@ -183,11 +188,8 @@ impl FractalApp {
         }
         let max_iter = s.max_iter.resolve(s.view.magnification());
         self.main_slot.submit(RenderRequest {
-            sampler: Arc::new(F64Sampler {
-                kind: s.kind,
-                max_iter,
-            }),
-            view: s.view,
+            sampler: sampler_for(&s.kind, &s.view, max_iter, 0.0),
+            view: s.view.clone(),
             progressive: true,
         });
         self.needs_render = false;
@@ -237,13 +239,17 @@ impl FractalApp {
                 self.bookmarks.open = !self.bookmarks.open;
             }
             ui.separator();
-            match self.cursor {
-                Some(z) => ui.monospace(format!("{:+.12} {:+.12}i", z.re, z.im)),
+            match &self.cursor_hi {
+                Some(z) => {
+                    let (re, im) = z.to_decimal(readout_digits(self.explore.view.pixel_scale()));
+                    ui.monospace(format!("{re} {im}i"))
+                }
                 None => ui.monospace("—"),
             };
             ui.separator();
             ui.label(format!("zoom {:.2e}", self.explore.view.magnification()));
-            if self.explore.view.at_precision_floor() {
+            let v = &self.explore.view;
+            if v.at_precision_floor(pixel_floor(&self.explore.kind, &v.center)) {
                 ui.separator();
                 ui.colored_label(Color32::from_rgb(240, 170, 40), "precision limit");
             }
@@ -288,7 +294,7 @@ impl FractalApp {
                     let e = &self.explore;
                     let start = MovieStart {
                         kind: e.kind,
-                        view: e.view,
+                        view: e.view.clone(),
                         max_iter: e.max_iter,
                         color: e.color,
                     };
@@ -342,7 +348,8 @@ impl FractalApp {
                     .texture
                     .as_ref()
                     .map(|t| (t, &self.explore.samples_view));
-                let resp = show_view(ui, image, &mut self.explore.view);
+                let floor = pixel_floor(&self.explore.kind, &self.explore.view.center);
+                let resp = show_view(ui, image, &mut self.explore.view, floor);
                 let (w, h) = resp.mapping.pixel_size();
                 let v = &mut self.explore.view;
                 if (v.width, v.height) != (w, h) {
@@ -352,6 +359,7 @@ impl FractalApp {
                 }
                 self.needs_render |= resp.view_changed;
                 self.cursor = resp.hovered;
+                self.cursor_hi = resp.hovered_hi.clone();
                 let max_iter = self
                     .explore
                     .max_iter
@@ -372,7 +380,7 @@ impl FractalApp {
                 if let Some(p) = resp.secondary_clicked {
                     self.menu_point = Some(p);
                 }
-                if let Some(p) = self.menu_point {
+                if let Some(p) = self.menu_point.clone() {
                     // Stays open while its fields are used; closes on a click
                     // outside, Escape, Save, Cancel or Center here.
                     egui::Popup::context_menu(&resp.response)
@@ -449,9 +457,9 @@ impl FractalApp {
 
 impl FractalApp {
     /// Right-click menu on the picture, for the point `p` that was clicked.
-    fn canvas_menu(&mut self, ui: &mut egui::Ui, p: Complex64) {
+    fn canvas_menu(&mut self, ui: &mut egui::Ui, p: HiComplex) {
         if ui.button("Center here").clicked() {
-            self.explore.view.center = p;
+            self.explore.view.center = p.clone();
             self.needs_render = true;
             ui.close();
         }
@@ -473,14 +481,14 @@ impl FractalApp {
         match self.mode {
             Mode::Escape => BookmarkView::Escape {
                 kind: e.kind,
-                center: e.view.center,
+                center: e.view.center.clone(),
                 span: e.view.span,
                 max_iter: e.max_iter,
                 color: e.color,
             },
             Mode::Ifs => BookmarkView::Ifs {
                 system: self.ifs.system.clone(),
-                center: self.ifs.view.center,
+                center: self.ifs.view.center.clone(),
                 span: self.ifs.view.span,
                 points: self.ifs.points,
                 color: e.color,

@@ -1,6 +1,7 @@
 //! The interactive fractal view: draws the rendered image and turns mouse
 //! input into zoom, pan, hover, and click.
 
+use crate::engine::deep::HiComplex;
 use crate::engine::viewport::Viewport;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, TextureHandle};
 use num_complex::Complex64;
@@ -9,10 +10,13 @@ use num_complex::Complex64;
 pub struct ViewResponse {
     /// Complex point under the cursor.
     pub hovered: Option<Complex64>,
+    /// Complex point under the cursor, at the view's precision.
+    pub hovered_hi: Option<HiComplex>,
     /// Complex point clicked (without dragging).
     pub clicked: Option<Complex64>,
-    /// Complex point right-clicked (where a context menu opens).
-    pub secondary_clicked: Option<Complex64>,
+    /// Complex point right-clicked (where a context menu opens), at the
+    /// view's precision.
+    pub secondary_clicked: Option<HiComplex>,
     /// The view's own response, for attaching a context menu.
     pub response: egui::Response,
     /// The view was zoomed or panned.
@@ -42,6 +46,11 @@ impl ScreenMapping {
     /// Screen position of a complex point in `view`.
     pub fn to_screen(&self, view: &Viewport, z: Complex64) -> Pos2 {
         let (x, y) = view.complex_to_pixel(z);
+        self.pixel_to_screen(x, y)
+    }
+
+    /// Screen position of physical pixel coordinate (x, y).
+    pub fn pixel_to_screen(&self, x: f64, y: f64) -> Pos2 {
         Pos2::new(
             self.rect.min.x + x as f32 / self.ppp,
             self.rect.min.y + y as f32 / self.ppp,
@@ -65,10 +74,13 @@ const ZOOM_STEP: f64 = 1.2;
 /// texture plus the viewport it was rendered for; if that differs from
 /// `view` (mid-pan, mid-zoom, or a low-res preview) it is drawn stretched
 /// to where that region now sits, so the old image slides with the mouse.
+/// `floor` is the smallest pixel spacing zooming may reach (see
+/// [`crate::engine::viewport::pixel_floor`]).
 pub fn show_view(
     ui: &mut egui::Ui,
     image: Option<(&TextureHandle, &Viewport)>,
     view: &mut Viewport,
+    floor: f64,
 ) -> ViewResponse {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -86,7 +98,7 @@ pub fn show_view(
         let mut factor = ZOOM_STEP.powf(scroll as f64 / SCROLL_PER_STEP);
         factor *= pinch as f64;
         if factor != 1.0 {
-            view.zoom_about(px, py, factor);
+            view.zoom_about(px, py, factor, floor);
             view_changed = true;
         }
     }
@@ -100,11 +112,15 @@ pub fn show_view(
 
     if let Some((texture, shown)) = image {
         // Where the rendered region's corners land in the current view.
-        let top_left = shown.pixel_to_complex(0.0, 0.0);
-        let bottom_right = shown.pixel_to_complex(shown.width as f64, shown.height as f64);
+        // Worked in offsets from the current center, so it holds at depth.
+        let shift = shown.center.diff_c64(&view.center);
+        let corner = |x: f64, y: f64| {
+            let (px, py) = view.offset_to_pixel(shift + shown.pixel_offset(x, y));
+            mapping.pixel_to_screen(px, py)
+        };
         let target = Rect::from_min_max(
-            mapping.to_screen(view, top_left),
-            mapping.to_screen(view, bottom_right),
+            corner(0.0, 0.0),
+            corner(shown.width as f64, shown.height as f64),
         );
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         painter.image(texture.id(), target, uv, Color32::WHITE);
@@ -115,18 +131,24 @@ pub fn show_view(
         view.pixel_to_complex(x, y)
     };
     let hovered = response.hover_pos().map(to_complex);
+    let to_hi = |pos: Pos2| {
+        let (x, y) = mapping.to_pixel(pos);
+        view.pixel_to_hi(x, y)
+    };
+    let hovered_hi = response.hover_pos().map(to_hi);
     let clicked = if response.clicked() {
         response.interact_pointer_pos().map(to_complex)
     } else {
         None
     };
     let secondary_clicked = if response.secondary_clicked() {
-        response.interact_pointer_pos().map(to_complex)
+        response.interact_pointer_pos().map(to_hi)
     } else {
         None
     };
     ViewResponse {
         hovered,
+        hovered_hi,
         clicked,
         secondary_clicked,
         response,

@@ -2,18 +2,21 @@
 
 use crate::engine::bookmark::{Bookmark, BookmarkView, FolderPath, folder_path, folders};
 use crate::engine::color::ColorSettings;
+use crate::engine::deep::HiComplex;
 use crate::engine::escape::FractalKind;
 use crate::engine::keyframe::{Block, KEYFRAME_MAX_PIXELS, Quality, estimated_cost, plan};
 use crate::engine::movie::{
     MovieError, MovieProgress, MovieSpec, Saved, find_ffmpeg, precision_floor, render_movie,
 };
+use crate::engine::perturb::uses_perturbation;
 use crate::engine::preview::{frame_at_time, preview_spec};
 use crate::engine::render::CancelToken;
 use crate::engine::route::{RotationUnit, Stop, outside_previous};
 use crate::engine::soundtrack::{CROSSFADE_S, find_ffprobe, playlist_length, probe_track};
-use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport, min_pixel_scale};
+use crate::engine::viewport::{DEFAULT_SPAN, MaxIter, Viewport};
 use crate::ui::bookmarks::BookmarksUi;
 use crate::ui::preview::{PlayerAction, Preview};
+use crate::ui::readout_digits;
 use eframe::egui;
 use num_complex::Complex64;
 use std::path::PathBuf;
@@ -60,7 +63,7 @@ struct Track {
 }
 
 /// The explorer state a movie starts from.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct MovieStart {
     pub kind: FractalKind,
     pub view: Viewport,
@@ -159,7 +162,7 @@ impl MovieStart {
     /// The movie start a bookmark describes, at the given frame size.
     /// IFS bookmarks can't start a zoom movie.
     pub fn from_bookmark(view: &BookmarkView, width: usize, height: usize) -> Option<Self> {
-        match *view {
+        match view {
             BookmarkView::Escape {
                 kind,
                 center,
@@ -167,10 +170,10 @@ impl MovieStart {
                 max_iter,
                 color,
             } => Some(Self {
-                kind,
-                view: Viewport::new(center, span, width, height),
-                max_iter,
-                color,
+                kind: *kind,
+                view: Viewport::new(center.clone(), *span, width, height),
+                max_iter: *max_iter,
+                color: *color,
             }),
             BookmarkView::Ifs { .. } => None,
         }
@@ -197,7 +200,11 @@ pub struct MovieDialog {
     /// Name of the start bookmark (`None` = current view).
     start_name: Option<String>,
     orbit_point: Option<Complex64>,
-    target: Complex64,
+    target: HiComplex,
+    /// The end-centre fields' text (re, im), as typed.
+    target_text: (String, String),
+    /// Why the typed end centre was not taken, if it wasn't.
+    target_error: Option<String>,
     end_magnification: f64,
     fps: u32,
     seconds: f64,
@@ -321,7 +328,9 @@ impl Default for MovieDialog {
             start: None,
             start_name: None,
             orbit_point: None,
-            target: Complex64::new(0.0, 0.0),
+            target: Complex64::new(0.0, 0.0).into(),
+            target_text: (String::new(), String::new()),
+            target_error: None,
             end_magnification: 1e10,
             fps: 30,
             seconds: 20.0,
@@ -437,10 +446,10 @@ impl MovieDialog {
     /// Open the dialog starting from the current explorer view.
     pub fn open(&mut self, start: MovieStart, orbit_point: Option<Complex64>) {
         self.open = true;
-        self.current = Some(start);
-        self.choose_start(None, start);
+        self.current = Some(start.clone());
+        self.choose_start(None, start.clone());
         self.orbit_point = orbit_point;
-        self.target = start.view.center;
+        self.put_target(start.view.center.clone());
         self.output = default_output();
         self.status = Status::Idle;
         self.find_tools();
@@ -544,9 +553,40 @@ impl MovieDialog {
     }
 
     /// Use a bookmark's center and zoom as the movie's destination.
-    pub fn set_target(&mut self, target: Complex64, magnification: f64) {
-        self.target = target;
+    pub fn set_target(&mut self, target: HiComplex, magnification: f64) {
         self.end_magnification = magnification;
+        self.put_target(target);
+    }
+
+    /// Set the end centre and show it in the fields.
+    fn put_target(&mut self, target: HiComplex) {
+        let pixel = DEFAULT_SPAN / self.end_magnification / self.height.max(1) as f64;
+        self.target_text = target.to_decimal(readout_digits(pixel));
+        self.target_error = None;
+        self.target = target;
+    }
+
+    /// Take a typed end centre; on a typo keep the old one and say why.
+    fn set_target_text(&mut self, re: &str, im: &str) {
+        match HiComplex::parse(re, im) {
+            Ok(t) => {
+                self.target = t;
+                self.target_error = None;
+            }
+            Err(e) => self.target_error = Some(e.to_string()),
+        }
+    }
+
+    /// The kind the start → end movie renders.
+    fn start_kind(&self) -> FractalKind {
+        self.start
+            .as_ref()
+            .map_or(FractalKind::Mandelbrot, |s| s.kind)
+    }
+
+    /// The deepest end zoom the end centre allows at this frame height.
+    fn end_zoom_max(&self) -> f64 {
+        DEFAULT_SPAN / precision_floor(&self.start_kind(), &self.target, self.height)
     }
 
     /// Duration, frame count, and zoom speed, under the duration slider.
@@ -572,13 +612,13 @@ impl MovieDialog {
             kind: start.kind,
             stops: vec![
                 Stop {
-                    center: start.view.center,
+                    center: start.view.center.clone(),
                     span: start.view.span,
                     rotation: 0.0,
                     rotation_unit: RotationUnit::PerSecond,
                 },
                 Stop {
-                    center: self.target,
+                    center: self.target.clone(),
                     span: DEFAULT_SPAN / self.end_magnification,
                     rotation: self.rotation,
                     rotation_unit: self.rotation_unit,
@@ -604,7 +644,7 @@ impl MovieDialog {
     fn folder_spec(&self, path: &FolderPath) -> MovieSpec {
         let mut spec = MovieSpec {
             kind: path.kind,
-            stops: path.stops.iter().map(|(_, s)| *s).collect(),
+            stops: path.stops.iter().map(|(_, s)| s.clone()).collect(),
             fps: self.fps,
             seconds: self.seconds,
             width: self.width,
@@ -623,7 +663,7 @@ impl MovieDialog {
     /// fewer than two usable stops (or the dialog was never opened).
     fn current_spec(&self, items: &[Bookmark]) -> Option<MovieSpec> {
         match &self.route {
-            RouteMode::StartEnd => self.start.map(|start| self.spec(&start)),
+            RouteMode::StartEnd => self.start.as_ref().map(|start| self.spec(start)),
             RouteMode::Folder(f) => folder_path(items, f)
                 .filter(|p| p.stops.len() >= 2)
                 .map(|p| self.folder_spec(&p)),
@@ -757,7 +797,9 @@ impl MovieDialog {
         self.receive();
         self.refresh_mode(&bookmarks.items);
         self.sync_music_length();
-        let Some(start) = self.start else { return };
+        let Some(start) = self.start.clone() else {
+            return;
+        };
         let running = self.job.is_some();
 
         let modal = egui::Modal::new(egui::Id::unique("movie_dialog")).show(ctx, |ui| {
@@ -778,8 +820,8 @@ impl MovieDialog {
                                 "Start ({}): {} at {:+.6} {:+.6}i, zoom {:.2e}",
                                 self.start_name.as_deref().unwrap_or("current view"),
                                 start.kind.label(),
-                                start.view.center.re,
-                                start.view.center.im,
+                                start.view.center.to_c64().re,
+                                start.view.center.to_c64().im,
                                 start.view.magnification()
                             ));
                             ui.small(
@@ -1014,10 +1056,12 @@ impl MovieDialog {
 
     /// Start, end and their helpers (Start → End mode).
     fn start_end_rows(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark]) {
-        let targets: Vec<(&str, Complex64, f64)> = bookmarks
+        let targets: Vec<(&str, HiComplex, f64)> = bookmarks
             .iter()
-            .filter_map(|b| match b.view {
-                BookmarkView::Escape { center, span, .. } => Some((b.name.as_str(), center, span)),
+            .filter_map(|b| match &b.view {
+                BookmarkView::Escape { center, span, .. } => {
+                    Some((b.name.as_str(), center.clone(), *span))
+                }
                 BookmarkView::Ifs { .. } => None,
             })
             .collect();
@@ -1029,36 +1073,48 @@ impl MovieDialog {
                 .show_ui(ui, |ui| {
                     for (name, center, span) in &targets {
                         if ui.selectable_label(false, *name).clicked() {
-                            self.set_target(*center, DEFAULT_SPAN / span);
+                            self.set_target(center.clone(), DEFAULT_SPAN / span);
                         }
                     }
                 });
             ui.end_row();
         }
         ui.label("End center");
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.target.re)
-                    .speed(1e-6)
-                    .max_decimals(15),
-            );
-            ui.add(
-                egui::DragValue::new(&mut self.target.im)
-                    .speed(1e-6)
-                    .max_decimals(15),
-            );
-            ui.label("i");
+        ui.vertical(|ui| {
+            let mut changed = false;
+            for text in [&mut self.target_text.0, &mut self.target_text.1] {
+                changed |= ui
+                    .add(egui::TextEdit::singleline(text).font(egui::TextStyle::Monospace))
+                    .changed();
+            }
+            if changed {
+                let (re, im) = self.target_text.clone();
+                self.set_target_text(&re, &im);
+            }
+            if let Some(e) = &self.target_error {
+                ui.small(e.as_str());
+            }
         });
         ui.end_row();
         if let Some(p) = self.orbit_point {
             ui.label("");
-            if ui.button("Center end on orbit point").clicked() {
-                self.target = p;
+            let end = Viewport::new(
+                self.target.clone(),
+                DEFAULT_SPAN / self.end_magnification,
+                self.width,
+                self.height,
+            );
+            let deep = uses_perturbation(&self.start_kind(), &end);
+            let button = ui
+                .add_enabled(!deep, egui::Button::new("Center end on orbit point"))
+                .on_disabled_hover_text("approximate at this depth");
+            if button.clicked() {
+                self.put_target(p.into());
             }
             ui.end_row();
         }
         ui.label("End zoom");
-        let floor_mag = DEFAULT_SPAN / (min_pixel_scale(self.target) * self.height as f64);
+        let floor_mag = self.end_zoom_max();
         crate::ui::slider(
             ui,
             egui::Slider::new(&mut self.end_magnification, 1.0..=floor_mag).logarithmic(true),
@@ -1102,7 +1158,7 @@ impl MovieDialog {
         };
         let mut prev: Option<Stop> = None;
         for (k, (idx, stop)) in path.stops.iter().enumerate() {
-            if let Some(p) = prev {
+            if let Some(p) = &prev {
                 ui.label("  turn");
                 let mut turn = bookmarks.items[*idx].rotation;
                 let mut unit = bookmarks.items[*idx].rotation_unit;
@@ -1116,7 +1172,7 @@ impl MovieDialog {
                     bookmarks.set_rotation(*idx, turn, unit);
                 }
                 ui.end_row();
-                if outside_previous(&p, stop, self.width, self.height) {
+                if outside_previous(p, stop, self.width, self.height) {
                     ui.label("");
                     ui.colored_label(WARNING, SWINGS_ACROSS);
                     ui.end_row();
@@ -1129,13 +1185,13 @@ impl MovieDialog {
                 DEFAULT_SPAN / stop.span
             ));
             ui.end_row();
-            let floor = precision_floor(stop.center, self.height);
+            let floor = precision_floor(&path.kind, &stop.center, self.height);
             if stop.span < floor {
                 ui.label("");
                 ui.small(depth_note(DEFAULT_SPAN / floor, self.height));
                 ui.end_row();
             }
-            prev = Some(*stop);
+            prev = Some(stop.clone());
         }
         if path.skipped > 0 {
             ui.label("");
@@ -1211,7 +1267,9 @@ impl MovieDialog {
 
     /// "Start" row: the current view or any escape-time bookmark.
     fn start_picker(&mut self, ui: &mut egui::Ui, bookmarks: &[Bookmark]) {
-        let Some(current) = self.current else { return };
+        let Some(current) = self.current.clone() else {
+            return;
+        };
         let (w, h) = (current.view.width, current.view.height);
         let starts: Vec<(&str, MovieStart)> = bookmarks
             .iter()
@@ -1305,7 +1363,7 @@ mod tests {
     fn bookmarked() -> BookmarkView {
         BookmarkView::Escape {
             kind: FractalKind::Multibrot { power: 3 },
-            center: Complex64::new(0.1, 0.2),
+            center: Complex64::new(0.1, 0.2).into(),
             span: 0.5,
             max_iter: MaxIter::Fixed(900),
             color: ColorSettings {
@@ -1385,7 +1443,7 @@ mod tests {
         );
         d.rotation = -145.0;
         d.rotation_unit = RotationUnit::Total;
-        let s = d.spec(&current()).stops[1];
+        let s = d.spec(&current()).stops[1].clone();
         assert_eq!((s.rotation, s.rotation_unit), (-145.0, RotationUnit::Total));
     }
 
@@ -1408,7 +1466,7 @@ mod tests {
     fn start_from_bookmark_takes_its_whole_view() {
         let s = MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap();
         assert_eq!(s.kind, FractalKind::Multibrot { power: 3 });
-        assert_eq!(s.view.center, Complex64::new(0.1, 0.2));
+        assert_eq!(s.view.center.to_c64(), Complex64::new(0.1, 0.2));
         assert_eq!(s.view.span, 0.5);
         assert_eq!((s.view.width, s.view.height), (800, 600));
         assert_eq!(s.max_iter, MaxIter::Fixed(900));
@@ -1419,7 +1477,7 @@ mod tests {
     fn ifs_bookmark_cannot_start_a_movie() {
         let ifs = BookmarkView::Ifs {
             system: crate::engine::ifs::IfsSystem::barnsley_fern(),
-            center: Complex64::new(0.0, 5.0),
+            center: Complex64::new(0.0, 5.0).into(),
             span: 10.5,
             points: 1000,
             color: ColorSettings::default(),
@@ -1435,16 +1493,16 @@ mod tests {
             Some("deep".into()),
             MovieStart::from_bookmark(&bookmarked(), 800, 600).unwrap(),
         );
-        let spec = d.spec(&d.start.unwrap());
-        assert_eq!(spec.stops[0].center, Complex64::new(0.1, 0.2));
+        let spec = d.spec(d.start.as_ref().unwrap());
+        assert_eq!(spec.stops[0].center, Complex64::new(0.1, 0.2).into());
         assert_eq!(spec.stops[0].span, 0.5);
         assert_eq!(spec.kind, FractalKind::Multibrot { power: 3 });
         assert_eq!(d.start_name.as_deref(), Some("deep"));
 
-        d.choose_start(None, d.current.unwrap());
+        d.choose_start(None, d.current.clone().unwrap());
         assert_eq!(
-            d.spec(&d.start.unwrap()).stops[0].center,
-            Complex64::new(-0.5, 0.0)
+            d.spec(d.start.as_ref().unwrap()).stops[0].center,
+            Complex64::new(-0.5, 0.0).into()
         );
         assert_eq!(d.start_name, None);
     }
@@ -1462,7 +1520,7 @@ mod tests {
     fn mandel(re: f64, im: f64, span: f64, offset: f32) -> BookmarkView {
         BookmarkView::Escape {
             kind: FractalKind::Mandelbrot,
-            center: Complex64::new(re, im),
+            center: Complex64::new(re, im).into(),
             span,
             max_iter: MaxIter::Fixed(500),
             color: ColorSettings {
@@ -1480,11 +1538,32 @@ mod tests {
         ]
     }
 
+    /// A Burning Ship bookmark: an f64-only kind, so it keeps the old
+    /// precision limit (Mandelbrot goes deeper by perturbation).
+    fn ship(re: f64, im: f64, span: f64, offset: f32) -> BookmarkView {
+        match mandel(re, im, span, offset) {
+            BookmarkView::Escape {
+                center,
+                span,
+                max_iter,
+                color,
+                ..
+            } => BookmarkView::Escape {
+                kind: FractalKind::BurningShip,
+                center,
+                span,
+                max_iter,
+                color,
+            },
+            other => other,
+        }
+    }
+
     #[test]
     fn folder_too_deep_for_1080_is_clamped() {
         let items = vec![
-            filed("top", "deep", mandel(-0.5, 0.0, 3.0, 0.25), 0.0),
-            filed("b9", "deep", mandel(-0.745, 0.105, 1.377e-12, 0.5), 0.0),
+            filed("top", "deep", ship(-0.5, 0.0, 3.0, 0.25), 0.0),
+            filed("b9", "deep", ship(-0.745, 0.105, 1.377e-12, 0.5), 0.0),
         ];
         let mut d = MovieDialog::default();
         d.open(current(), None);
@@ -1500,7 +1579,7 @@ mod tests {
                 "{h}: {:?}",
                 spec.validate_frames()
             );
-            let floor = precision_floor(spec.stops[1].center, h);
+            let floor = precision_floor(&spec.kind, &spec.stops[1].center, h);
             assert_eq!(spec.stops[1].span, floor, "{h}");
         }
     }
@@ -1508,8 +1587,9 @@ mod tests {
     #[test]
     fn start_end_survives_a_taller_size() {
         let mut d = MovieDialog::default();
-        d.target = Complex64::new(-0.745, 0.105);
-        d.end_magnification = DEFAULT_SPAN / precision_floor(d.target, d.height);
+        d.target = Complex64::new(-0.745, 0.105).into();
+        d.end_magnification =
+            DEFAULT_SPAN / precision_floor(&FractalKind::Mandelbrot, &d.target, d.height);
         assert!(d.spec(&current()).validate_frames().is_ok());
         (d.width, d.height) = (1920, 1080);
         let spec = d.spec(&current());
@@ -1657,7 +1737,7 @@ mod tests {
         d.open(current(), None);
         let ifs = BookmarkView::Ifs {
             system: crate::engine::ifs::IfsSystem::barnsley_fern(),
-            center: Complex64::new(0.0, 5.0),
+            center: Complex64::new(0.0, 5.0).into(),
             span: 10.5,
             points: 1000,
             color: ColorSettings::default(),
@@ -1944,5 +2024,42 @@ mod tests {
         d.reprobe_failed();
         let secs = d.music[0].probed.clone().unwrap();
         assert!((secs - 1.0).abs() < 0.1, "{secs}");
+    }
+
+    #[test]
+    fn typed_deep_target() {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        let re = "-0.7436438870371587047521915061147743789";
+        d.set_target_text(re, "0.1318259042053620");
+        assert_eq!(d.target_error, None);
+        let (got, _) = d.target.to_decimal(37);
+        assert!(
+            got.starts_with("-0.743643887037158704752191506114774378"),
+            "{got}"
+        );
+        let before = d.target.clone();
+        d.set_target_text("abc", "0");
+        assert_eq!(d.target, before);
+        assert!(d.target_error.is_some());
+    }
+
+    #[test]
+    fn end_zoom_reaches_deep_floor() {
+        let mut d = MovieDialog::default();
+        d.open(current(), None);
+        d.height = 1080;
+        assert!(d.end_zoom_max() >= 1e290, "{:e}", d.end_zoom_max());
+        let julia = MovieStart {
+            kind: FractalKind::Julia {
+                c: Complex64::new(-0.8, 0.156),
+            },
+            ..current()
+        };
+        d.open(julia, None);
+        d.height = 1080;
+        let old =
+            DEFAULT_SPAN / (crate::engine::viewport::min_pixel_scale(d.target.to_c64()) * 1080.0);
+        assert!((d.end_zoom_max() / old - 1.0).abs() < 1e-9);
     }
 }

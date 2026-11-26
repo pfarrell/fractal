@@ -21,15 +21,17 @@
 //! on the step arriving there.
 
 use crate::engine::color::{ColorSettings, colorize};
+use crate::engine::deep::HiComplex;
 use crate::engine::escape::{FractalKind, Sample, iterate};
 use crate::engine::keyframe::{
     Block, KEYFRAME_MAX_PIXELS, Quality, frame_work, keyframe_work, plan_range, planned_work,
     render_keyframe, resample,
 };
+use crate::engine::perturb::sampler_for;
 use crate::engine::render::{CancelToken, Sampler, render};
 use crate::engine::route::{JOINT_HALF_WIDTH_S, Route, Stop, step_length};
 use crate::engine::soundtrack::{add_music, plan_soundtrack, probe_track};
-use crate::engine::viewport::{MaxIter, Viewport, min_pixel_scale};
+use crate::engine::viewport::{MaxIter, Viewport, pixel_floor};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -45,18 +47,25 @@ pub fn rotated_point(view: &Viewport, angle: f64, x: f64, y: f64) -> Complex64 {
     if angle == 0.0 {
         return view.pixel_to_complex(x, y);
     }
-    let s = view.pixel_scale();
-    let dx = (x - view.width as f64 / 2.0) * s;
-    let dy = -(y - view.height as f64 / 2.0) * s;
-    let (sin, cos) = angle.sin_cos();
-    view.center + Complex64::new(dx * cos - dy * sin, dx * sin + dy * cos)
+    view.center.to_c64() + rotated_offset(view, angle, x, y)
 }
 
-/// The smallest span (frame height in the complex plane) a frame
-/// `height` pixels tall can have at `center` and still resolve each pixel
-/// in f64.
-pub fn precision_floor(center: Complex64, height: usize) -> f64 {
-    min_pixel_scale(center) * height as f64
+/// Offset from `view`'s center of the point at pixel position (`x`, `y`)
+/// turned by `angle` radians (counterclockwise) about the center.
+pub fn rotated_offset(view: &Viewport, angle: f64, x: f64, y: f64) -> Complex64 {
+    let d = view.pixel_offset(x, y);
+    if angle == 0.0 {
+        return d;
+    }
+    let (sin, cos) = angle.sin_cos();
+    Complex64::new(d.re * cos - d.im * sin, d.re * sin + d.im * cos)
+}
+
+/// The smallest span (frame height in the complex plane) a frame of
+/// `kind`, `height` pixels tall, can have at `center` (see
+/// [`pixel_floor`]).
+pub fn precision_floor(kind: &FractalKind, center: &HiComplex, height: usize) -> f64 {
+    pixel_floor(kind, center) * height as f64
 }
 
 /// One `iterate` per pixel, with the picture turned by `angle` radians.
@@ -318,7 +327,7 @@ impl MovieSpec {
         let last = self.stops.len() - 1;
         for (k, s) in self.stops.iter().enumerate() {
             // Small tolerance so "as deep as allowed" survives float rounding.
-            if s.span < precision_floor(s.center, self.height) * (1.0 - 1e-9) {
+            if s.span < precision_floor(&self.kind, &s.center, self.height) * (1.0 - 1e-9) {
                 return Err(MovieError::Invalid(if k == last {
                     "end zoom is past the f64 precision limit for this point".into()
                 } else {
@@ -355,10 +364,10 @@ impl MovieSpec {
     /// to that floor, so the movie renders as deep as f64 allows rather
     /// than failing validation. Returns the indices of the stops raised.
     pub fn clamp_depth(&mut self) -> Vec<usize> {
-        let height = self.height;
+        let (height, kind) = (self.height, self.kind);
         let mut raised = Vec::new();
         for (k, s) in self.stops.iter_mut().enumerate() {
-            let floor = precision_floor(s.center, height);
+            let floor = precision_floor(&kind, &s.center, height);
             if s.span < floor {
                 s.span = floor;
                 raised.push(k);
@@ -391,13 +400,16 @@ impl MovieSpec {
         self.route().angle_at(self.frame_time(i))
     }
 
-    /// Frame `i`'s four corners in the complex plane, turned with the
-    /// frame: top-left, top-right, bottom-right, bottom-left.
-    pub fn frame_corners(&self, i: usize) -> [Complex64; 4] {
+    /// Frame `i`'s four corners, turned with the frame, as offsets from
+    /// `origin` (so they keep their precision at any depth): top-left,
+    /// top-right, bottom-right, bottom-left.
+    pub fn frame_corner_offsets(&self, i: usize, origin: &HiComplex) -> [Complex64; 4] {
         let view = self.frame_view(i);
         let angle = self.frame_angle(i);
+        let shift = view.center.diff_c64(origin);
         let (w, h) = (view.width as f64, view.height as f64);
-        [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| rotated_point(&view, angle, x, y))
+        [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
+            .map(|(x, y)| shift + rotated_offset(&view, angle, x, y))
     }
 }
 
@@ -632,13 +644,10 @@ pub fn render_exact_frame(
     out: &mut [[u8; 4]],
 ) -> Result<(), MovieError> {
     let view = spec.frame_view(i);
-    let sampler = RotatedSampler {
-        kind: spec.kind,
-        max_iter: spec.max_iter.resolve(view.magnification()),
-        angle: spec.frame_angle(i),
-    };
-    let samples =
-        render(&sampler, &view, pool, cancel).ok_or(MovieError::Cancelled { kept: None })?;
+    let max_iter = spec.max_iter.resolve(view.magnification());
+    let sampler = sampler_for(&spec.kind, &view, max_iter, spec.frame_angle(i));
+    let samples = render(sampler.as_ref(), &view, pool, cancel)
+        .ok_or(MovieError::Cancelled { kept: None })?;
     colorize(&samples, &spec.color, out);
     Ok(())
 }
